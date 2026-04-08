@@ -1,9 +1,9 @@
 #include "board.h"
-#include "loki_system.h"
+#include "px_system.h"
 #include "drv_rgb_led.h"
 #include "esp_log.h"
 
-static const char *TAG = "loki-wp1";
+static const char *TAG = "px-wifi-v1";
 
 static const rgb_color_t colors[] = {
     {  0,   0,   0},   /* off     */
@@ -23,9 +23,9 @@ static const rgb_color_t colors[] = {
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting loki-wp1");
+    ESP_LOGI(TAG, "Starting px-wifi-v1");
 
-    ESP_ERROR_CHECK(loki_system_init());
+    ESP_ERROR_CHECK(px_system_init());
 
     drv_rgb_led_config_t led_cfg = {
         .gpio_num = BOARD_RGB_LED_GPIO,
