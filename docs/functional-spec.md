@@ -58,6 +58,8 @@ The PX-WiFi-V1 serves two roles:
 | Fallback | If connection fails after 30s, enters AP mode for configuration |
 | AP SSID | `Paradox-<device-id>` (e.g., `Paradox-wire-defusal`) |
 | Reconnection | Automatic reconnection with exponential backoff |
+| Backoff policy | Retry delays: 1s, 2s, 4s, 8s, 16s, 32s, then capped at 32s between attempts |
+| Backoff reset | On successful reconnect, next failure restarts backoff at 1s |
 | Signal | Must operate reliably at typical escape room distances (≤30m through walls) |
 
 ### 4.3 Communication Protocols
@@ -68,6 +70,35 @@ The PX-WiFi-V1 serves two roles:
 | WebSocket | Live web UI updates, alternative to MQTT for local control |
 | HTTP | Configuration web interface, REST API |
 
+MQTT reconnect uses exponential backoff independent of WiFi: 1s, 2s, 4s, 8s, 16s, 32s, then capped at 32s maximum wait between attempts.
+
+### 4.4 Power Saving and Wake Strategy
+
+Power saving is configurable and can be changed by deployment profile.
+
+| Option | Behavior | Tradeoffs |
+|--------|----------|-----------|
+| Display blanking | In `READY`, turn off all display segments (`"    "`) while keeping MCU/network active | Fast response, moderate savings |
+| Display rail gating | Optional MOSFET/relay disables display power in `READY` | Better savings, added hardware complexity |
+| Light sleep | MCU sleeps between periodic tasks, keeps RAM/peripherals and WiFi available | Fast wake, moderate savings |
+| Deep sleep cycle | Sleep in fixed windows (default 30s, max idle cycle 300s), wake to reconnect/process commands | Highest savings, more reconnect overhead |
+
+Preferred default for this prop is `lightSleep`.
+
+Command latency target in light sleep:
+
+- Wake latency for inbound MQTT command processing should typically be <250 ms.
+- Worst-case practical latency target should remain <1 second.
+- If measured latency exceeds 1 second in venue conditions, disable sleep for live rounds or switch to keep-sync + wake scheduling.
+
+Deep-sleep mode may require a pre-start wake workflow:
+
+1. Controller sends `wake` command 35-295s before expected `start`.
+2. Device wakes, reconnects WiFi/MQTT, publishes current state.
+3. Controller sends `start` at scheduled time.
+
+If keep-sync is enabled (Section 6.8), the device subscribes to game-state updates and tracks controller time/mode while hidden, then transitions to countdown behavior when local run starts.
+
 ---
 
 ## 5. I/O Requirements
@@ -76,11 +107,11 @@ The PX-WiFi-V1 serves two roles:
 
 | Requirement | Detail |
 |-------------|--------|
-| Minimum inputs | 8 digital inputs |
+| Minimum inputs | 8 digital inputs (v1 uses 4 wires + optional lid) |
 | Switchable I/O | At least 4 of the 8 must be configurable as outputs |
 | Connector | Multi-pin wiring harness connector (e.g., JST-XH, Molex) |
 | Input type | Active-low with internal pull-up (button/switch to ground) |
-| Debouncing | Software debounce, configurable per-channel (default 50ms) |
+| Debouncing | Software debounce, configurable by check interval + consecutive matching reads |
 | Output type | 3.3V logic level, max ~12mA per pin |
 
 ### 5.2 Low-Power Outputs
@@ -95,8 +126,8 @@ The PX-WiFi-V1 serves two roles:
 
 | Requirement | Detail |
 |-------------|--------|
-| Type | DAC output or PWM-based tone generation |
-| v1.0 use | Drive a piezoelectric buzzer for countdown beeps and alerts |
+| Type | PWM-based tone generation to passive piezoelectric buzzer |
+| v1.0 use | Drive passive piezo buzzer for countdown beeps and alerts |
 | Future | Support for I2S audio output to external amplifier/speaker |
 | Capabilities | Configurable tone frequency, duration, and pattern (e.g., beep-beep-beep) |
 
@@ -136,80 +167,223 @@ Players encounter a prop (themed as a bomb, security panel, junction box, etc.) 
 ### 6.2 Physical Setup
 
 - **4 wires** connected to 4 GPIO inputs via the wiring harness
-- **Lid/tamper switch** on 1 GPIO input (detects when players first interact with the prop)
+- **Optional lid/tamper switch** on 1 GPIO input
 - **Countdown display** on I2C port (7-segment, 4-digit: MM:SS)
-- **Piezo buzzer** on DAC/PWM output
+- **Passive piezo buzzer** on PWM output
 - **Status RGB LED** onboard
 
 ### 6.3 Game States
 
 ```
-                MQTT "start"
-  [IDLE] ──────────────────► [ARMED]
-    ▲                           │
-    │ MQTT "reset"              │ Lid opened
-    │                           ▼
-    │                      [COUNTDOWN]
-    │                        /     \
-    │            All wires  /       \ Timer hits 0
-    │           correct    /         \ or wrong order
-    │                     ▼           ▼
-    │               [DEFUSED]    [DETONATED]
-    │                   │             │
-    └───────────────────┴─────────────┘
-                  MQTT "reset"
+           MQTT "start" or "resume" (optional time)
+  [READY / NOT_READY] ───────────────────────────────► [COUNTDOWN]
+        ▲                                                     │
+        │ MQTT "reset"                                       │
+        │                                                     │
+        │                                           timer = 0 │
+        │                                        or fail mode │
+        │                                                     ▼
+        │                                                [DETONATED]
+        │                                                     │
+        │                                                     │ hold up to 5 min
+        │                                                     │ then auto reset
+        │                                                     │
+        │                                                     ▼
+        │                                             [READY / NOT_READY]
+        │
+        │ all required wires disconnected in order
+        └───────────────────────────────────────────── [DEFUSED]
+                                                              │
+                                                              │ hold up to 5 min
+                                                              │ then auto reset
+                                                              ▼
+                                                      [READY / NOT_READY]
 ```
 
 | State | Description |
 |-------|-------------|
-| **IDLE** | Waiting for game start. Display blank or showing `--:--`. No inputs monitored. |
-| **ARMED** | Game started. Display shows initial time. Waiting for lid open or first wire pull. |
+| **NOT_READY** | One or more required wires are not connected. Display shows per-wire readiness markers in color order (R, G, Y, B). |
+| **READY** | All required wires are connected. Device is ready to start countdown. |
 | **COUNTDOWN** | Timer actively counting down. Wire disconnects are monitored and validated. |
-| **DEFUSED** | All wires disconnected in correct order. Timer stops. Success indication. |
-| **DETONATED** | Timer expired or wrong wire order. Failure indication. |
+| **DEFUSED** | Required disconnect sequence completed. Timer stops and remains frozen for up to 5 minutes or until `reset`. |
+| **DETONATED** | Timer expired or failure condition triggered. Timer remains frozen for up to 5 minutes or until `reset`. |
 
 ### 6.4 Timer Behavior
 
 | Requirement | Detail |
 |-------------|--------|
 | Internal countdown | Device runs its own countdown timer independently |
+| Start behavior | `start` and `resume` both begin countdown immediately from current time (no lid wait) |
+| Combined command | `start` may include `time` in the same payload, e.g. `{"command":"start","time":900}` |
 | Time sync | Game controller may push time updates via MQTT (`setTime` command) |
 | Display update rate | At least 1 Hz (every second) |
-| Initial time | Configurable via MQTT command or web config (default: 5:00) |
-| Beep pattern | Configurable. Example: beep every second in last 30s, continuous in last 10s |
+| Default initial time | 3600 seconds (60:00) unless changed by saved configuration |
+| Hold-after-end | On `DEFUSED` or `DETONATED`, hold displayed final time up to 5 minutes, then auto-reset |
+| No tenths display | 4-digit display remains `MM:SS` only; no tenths shown |
 
 ### 6.5 Wire Sequence Validation
 
 | Requirement | Detail |
 |-------------|--------|
-| Correct order | Configurable sequence (e.g., [Red, Blue, Yellow, Green]) |
-| Wrong wire penalty | Configurable: `beep_only`, `time_penalty`, `instant_fail` |
+| Supported wire count | v1 supports 4 wires; architecture must support up to 8 wires in future |
+| Input identity model | Inputs are indexed and named separately: `INPUT_1..INPUT_8` + user label (`Name`) |
+| Default input names | `INPUT_1=red`, `INPUT_2=green`, `INPUT_3=yellow`, `INPUT_4=blue` |
+| Correct order | Configurable disconnect order via solution vector string (default `"1234"`) |
+| Required sequence length | Configurable from 1 to total wire count; wires not in sequence must remain connected |
+| Wrong wire mode | Configurable via `setMode`: `buzz`, `penalty`, `instant` |
 | Time penalty amount | Configurable (default: 30 seconds deducted) |
+| Penalty edge handling | If remaining time <30s: detonate immediately. If 30-60s: set remaining time to 20s |
+| Max tries | Integer 1-100 (inclusive), applies in `buzz` and `penalty` modes |
 | Detection | Each wire GPIO transitions from connected (LOW) to disconnected (HIGH) |
-| Debounce | 50ms minimum to avoid false triggers from vibration |
+| Reconnect handling | Reconnection rules apply only in `buzz` and `penalty` modes |
+| Debounce | Default check interval 10ms and 5 consecutive identical readings |
+
+Example: with 4 wires and custom order red/yellow/green/blue, solution vector is `"1324"`.
 
 ### 6.6 Audio Feedback
 
 | Event | Audio Response |
 |-------|---------------|
-| Lid opened | Single short beep |
+| Countdown, lid closed, >5 min left | 1 second beep once per minute |
+| Countdown, lid open OR <=5 min left | 0.1 second beep once per second |
+| Last 10 seconds | 0.1 second beep every 250ms |
 | Correct wire disconnected | Rising tone (pitch increases with each correct wire) |
 | Wrong wire disconnected | Harsh buzz / error tone |
-| Last 30 seconds | Periodic beep (1 Hz) |
-| Last 10 seconds | Rapid beep (4 Hz) |
-| Defused (success) | Victory melody or sustained tone |
-| Detonated (failure) | Descending tone / alarm |
+| Defused (success) | Configurable: `none`, `beeps` (3 quick high beeps), or `melody` |
+| Detonated (failure) | Configurable: `none`, `buzz` (5s at 1kHz), or `melody` |
+| Detonated active sound | Solid tone/buzz for 5 seconds on detonation |
 | MQTT command received | Optional brief acknowledgment beep |
+
+Melody strings use **MML-style** (Music Macro Language) notation: note + octave + duration, comma-separated.   
+Example: `C5-4,D5-4,E5-4` = C, D, E in octave 5, each quarter-note duration.
+
+#### 6.6.1 Default Melodies
+
+**Success (defused) melody:**
+```
+C6-8,D6-8,E6-4
+```
+(High three-note ascending tone sequence)
+
+**Failure (detonated) melody:**
+```
+E5-4,D5-4,C5-4,B4-4
+```
+(Descending tone sequence suggesting failure/alarm)
+
+Both are configurable via the web UI `Audio` configuration section.
 
 ### 6.7 Display Behavior
 
 | State | Display Shows |
 |-------|--------------|
-| IDLE | `--:--` or blank |
-| ARMED | Initial countdown time (e.g., `05:00`) |
+| READY | Current configured start time, with center `:` blinking 0.1s once per second |
+| NOT_READY | Four-character readiness string in index order `INPUT_1..INPUT_4` (`-` for connected, input index digit for disconnected) |
 | COUNTDOWN | Live countdown `MM:SS` |
-| DEFUSED | `00:00` or remaining time, then flashing |
-| DETONATED | `00:00` flashing, or `FAIL` if display supports it |
+| DEFUSED | Hold final remaining time for up to 5 minutes or until reset |
+| DETONATED | Hold final time/result for up to 5 minutes or until reset |
+
+### 6.8 Optional Keep-Sync Process
+
+When keep-sync is enabled in configuration:
+
+- Device subscribes to controller game-state topic(s) and tracks remote `timeRemaining` and mode (`running`, `paused`, etc.).
+- Local displayed time is corrected to remain within ±1 second of controller time.
+- During WiFi/MQTT outages, the device continues local timing and resynchronizes after reconnect.
+- Keep-sync is optional and disabled by default.
+
+#### 6.8.1 Keep-Sync Topic Subscription and Schema
+
+**Configuration (Web UI):**
+
+- `game_state_topic`: Configurable topic to subscribe to authoritative game state (default: `paradox/game/state`)
+- `prop_state_topic`: Configurable topic for prop/app online heartbeat feed (default: `paradox/state`)
+- `time_tolerance_ms`: Max allowed time difference before correction (default: 1000 ms)
+
+**Expected Game State Message Schema:**
+
+```json
+{
+  "ts": 1712601234567,
+  "gameMode": "running",
+  "timeRemaining": 423,
+  "gamePaused": false,
+  "roundActive": true,
+  "siteId": "location-1",
+  "zoneId": "zone-a"
+}
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `ts` | number | Server millisecond timestamp |
+| `gameMode` | string | `"running"`, `"paused"`, or `"idle"` |
+| `timeRemaining` | number | Seconds remaining on game clock |
+| `gamePaused` | boolean | True if game is paused (countdown halted) |
+| `roundActive` | boolean | True if a puzzle round is actively running |
+| `siteId` | string | Game site/location identifier (optional context) |
+| `zoneId` | string | Zone identifier (optional context) |
+
+**Sync Behavior:**
+
+1. On message receipt, device compares remote `timeRemaining` and `gameMode` to local state.
+2. If difference exceeds `time_tolerance_ms` OR mode differs: adjust local timer, update state flags, publish `syncAdjusted` event.
+3. During outages: continue local countdown independently, buffer events with timestamps.
+4. On reconnect: resubscribe, retrieve latest game state, resync.
+5. On deep-sleep wake: reconnect, retrieve game state, publish `reconnected` event, ready for `start` command.
+6. When keep-sync is enabled, inbound `start/pause/resume/setTime` commands are accepted but authoritative game-state topic values override local command effects.
+
+**Conflict window / de-dupe rule:**
+
+- Apply a command dedupe window of 750 ms (configurable) keyed by `{command, source, ts}`.
+- If a keep-sync state update arrives inside the same 750 ms window and conflicts with command result, keep-sync state wins.
+- Publish `commandOverridden` event when this occurs.
+
+**When Disabled:**
+- Device does not subscribe to game state topics.
+- Responds only to explicit MQTT commands (start, pause, resume, etc.).
+- Heartbeat publishing (if enabled) continues independently.
+
+#### 6.8.2 Prop State and Announce Strategy
+
+The device implements the Paradox standard prop/app state + announce pattern:
+
+- **Prop state heartbeat** (periodic): published every N seconds (default: 10s) to `paradox/state` (configurable).
+- **Announce** (event-based): published immediately upon WiFi+MQTT reconnect after >30s offline.
+
+State/Announce JSON:
+
+```json
+{
+  "ts": 1712601234567,
+  "propId": "wire-defusal-1",
+  "status": "online",
+  "gameState": "countdown",
+  "uptime": 43200,
+  "ip": "192.168.4.15",
+  "rssi": -62,
+  "battery": 87,
+  "reconnectReason": "power-loss",
+  "buildId": "28fda08",
+  "buildDate": "2026-04-08",
+  "buildTime": "13:21:07"
+}
+```
+
+| Field | Type | Optional | Meaning |
+|-------|------|----------|---------|
+| `ts` | number | No | Millisecond timestamp |
+| `propId` | string | No | Device identifier |
+| `status` | string | No | `"online"`, `"offline"`, `"error"` |
+| `gameState` | string | No | Current state (ready, countdown, detonated, defused) |
+| `uptime` | number | No | Seconds since boot |
+| `ip` | string | No | Current IP address |
+| `rssi` | number | No | WiFi signal strength (dBm, negative) |
+| `battery` | number | No | Battery capacity estimate (0–100%) |
+| `reconnectReason` | string | Yes | Only in announce: e.g., `"power-loss"`, `"wifi-drop"`, `"mqtt-timeout"` |
+| `buildId` | string | Yes | Build identifier (version hash/tag) when available |
+| `buildDate` | string | Yes | Build date when available |
+| `buildTime` | string | Yes | Build time when available |
 
 ---
 
@@ -224,15 +398,20 @@ All communication follows the **Paradox v2 MQTT Protocol** (see `PR_PX_APP_COMM_
 
 | Command | Payload | Description |
 |---------|---------|-------------|
-| `start` | `{"command": "start"}` | Begin the game. Transition to ARMED state. |
-| `start` | `{"command": "start", "time": 300}` | Begin with specific countdown (seconds). |
+| `start` | `{"command": "start"}` | Begin/resume countdown immediately from current timer value. |
+| `start` | `{"command": "start", "time": 900}` | Set time and begin countdown immediately in one command. |
 | `stop` | `{"command": "stop"}` | Halt countdown immediately. Remain in current state. |
 | `pause` | `{"command": "pause"}` | Pause countdown. Timer holds. Display blinks. |
-| `resume` | `{"command": "resume"}` | Resume countdown from paused state. |
-| `reset` | `{"command": "reset"}` | Return to IDLE. Clear all state. |
+| `resume` | `{"command": "resume"}` | Alias of `start`; begins countdown immediately from current timer value. |
+| `reset` | `{"command": "reset"}` | Return to READY/NOT_READY based on current wire connectivity. Clear round state. |
 | `setTime` | `{"command": "setTime", "time": 180}` | Update countdown to specific value (seconds). |
-| `setSequence` | `{"command": "setSequence", "order": [3,1,4,2]}` | Set the correct wire disconnect order (wire numbers). |
-| `setPenalty` | `{"command": "setPenalty", "mode": "time_penalty", "amount": 30}` | Configure wrong-wire penalty behavior. |
+| `setSequence` | `{"command": "setSequence", "solution": "3124", "wireCount": 4, "requiredLength": 4}` | Set required disconnect order by input index vector string. |
+| `setMode` | `{"command": "setMode", "mode": "penalty", "maxTries": 3}` | Configure wrong-wire mode and retry limit for active round. |
+| `setPenalty` | `{"command": "setPenalty", "amount": 30}` | Configure time penalty seconds for active round. |
+| `setLidMode` | `{"command": "setLidMode", "mode": "ignore|normallyOpen|normallyClosed"}` | Set lid behavior for active round. |
+| `solve` | `{"command": "solve"}` | Force transition to `DEFUSED`. Only accepted during active countdown/paused states. |
+| `fail` | `{"command": "fail", "reason": "controller"}` | Force transition to `DETONATED`. Only accepted during active countdown/paused states. |
+| `wake` | `{"command": "wake"}` | Force wake/reconnect cycle and immediate state publish (for power-save scheduling). |
 | `getState` | `{"command": "getState"}` | Trigger immediate state report. |
 | `restart` | `{"command": "restart"}` | Soft-reboot the device. |
 | `identify` | `{"command": "identify"}` | Flash the RGB LED for physical identification. |
@@ -245,11 +424,14 @@ All communication follows the **Paradox v2 MQTT Protocol** (see `PR_PX_APP_COMM_
   "status": "online",
   "id": "wire-defusal",
   "gameState": "countdown",
+  "readyState": "ready",
   "timeRemaining": 142,
   "wiresDisconnected": [3, 1],
   "wiresRemaining": [4, 2],
   "correctSoFar": true,
-  "penalty": "time_penalty",
+  "mode": "penalty",
+  "maxTries": 3,
+  "triesUsed": 1,
   "uptime": 3600,
   "version": "1.0.0",
   "ip": "192.168.1.50",
@@ -265,10 +447,12 @@ All communication follows the **Paradox v2 MQTT Protocol** (see `PR_PX_APP_COMM_
 | `wireDisconnected` | `{"event": "wireDisconnected", "ts": ..., "data": {"wire": 3, "position": 1, "correct": true}}` | A wire is pulled |
 | `defused` | `{"event": "defused", "ts": ..., "data": {"timeRemaining": 42}}` | All wires correct |
 | `detonated` | `{"event": "detonated", "ts": ..., "data": {"reason": "timeout"}}` | Timer expired |
-| `detonated` | `{"event": "detonated", "ts": ..., "data": {"reason": "wrongWire", "wire": 2}}` | Wrong wire pulled (instant_fail mode) |
+| `detonated` | `{"event": "detonated", "ts": ..., "data": {"reason": "wrongWire", "wire": 2}}` | Wrong wire pulled (`instant` mode) |
 | `penaltyApplied` | `{"event": "penaltyApplied", "ts": ..., "data": {"wire": 2, "penalty": 30, "newTime": 112}}` | Time deducted for wrong wire |
-| `stateChanged` | `{"event": "stateChanged", "ts": ..., "data": {"from": "idle", "to": "armed"}}` | Any game state transition |
+| `stateChanged` | `{"event": "stateChanged", "ts": ..., "data": {"from": "not_ready", "to": "ready"}}` | Any game state transition |
 | `timerSync` | `{"event": "timerSync", "ts": ..., "data": {"time": 142}}` | Periodic time broadcast (every 10s during countdown) |
+| `syncAdjusted` | `{"event": "syncAdjusted", "ts": ..., "data": {"before": 420, "after": 419}}` | Keep-sync corrected local timer to match controller |
+| `commandOverridden` | `{"event": "commandOverridden", "ts": ..., "data": {"command": "resume", "reason": "keepSyncStateAuthoritative"}}` | Local command accepted but overridden by keep-sync state update |
 
 ### 7.4 Outbound Warnings (publish to `.../warnings`)
 
@@ -277,6 +461,8 @@ All communication follows the **Paradox v2 MQTT Protocol** (see `PR_PX_APP_COMM_
 | `{"warning": "lowBattery", "ts": ..., "message": "Battery voltage below 6.5V", "data": {"voltage": 6.3}}` | Battery getting low |
 | `{"warning": "wifiReconnect", "ts": ..., "message": "WiFi connection lost, reconnecting"}` | WiFi dropped |
 | `{"warning": "mqttReconnect", "ts": ..., "message": "MQTT broker connection lost"}` | MQTT dropped |
+
+If WiFi or MQTT drops mid-game, the prop continues locally. Events are buffered with timestamps and replayed in order when connectivity returns.
 
 ---
 
@@ -288,9 +474,20 @@ All communication follows the **Paradox v2 MQTT Protocol** (see `PR_PX_APP_COMM_
 |---------|--------|
 | **Network** | WiFi SSID, Password, MQTT broker address, MQTT port |
 | **Identity** | Site name, Zone name, Device ID |
-| **Puzzle** | Default countdown time, Wire sequence, Penalty mode, Penalty amount |
-| **Audio** | Beep volume, Enable/disable audio feedback per event |
+| **Puzzle** | Default countdown time, Wire count, Required sequence length, Wire sequence, Wrong-wire mode, Penalty amount, Max tries, Lid mode |
+| **Inputs** | Input labels (`INPUT_1..INPUT_8` names), active input count, solution vector string |
+| **Audio** | Success sound option, Success melody string, Failure sound option, Failure melody string |
+| **Input Filtering** | Debounce check interval (ms), consecutive readings threshold |
+| **Display/LED** | LED brightness (default 80%) |
+| **Battery** | Battery profile, Low-battery threshold (%) |
+| **Power Save** | Power-save mode (`none`, `displayBlank`, `displayRailGated`, `lightSleep`, `deepSleep`), sleep window (default 30s), max idle cycle (default 300s), pre-start wake window |
+| **Sync** | Keep-sync enable, controller state topic, max allowed drift (default 1s) |
+| **Telemetry** | Heartbeat publish interval (default 10s) |
 | **System** | Firmware version, Uptime, Free heap, OTA update URL + trigger |
+
+`Save` on this page updates persistent defaults stored in a local configuration file loaded at boot.
+
+MQTT (or other comms) parameter updates are temporary for the current runtime/session unless explicitly saved via the configuration UI/API.
 
 ### 8.2 Live Status (`ws://<device-ip>/ws`)
 
@@ -305,8 +502,8 @@ WebSocket pushes the same JSON events as MQTT in real time. Useful for a technic
 | Magenta | Solid | AP mode — waiting for WiFi configuration |
 | Blue | Slow pulse (1 Hz) | Connecting to WiFi |
 | Cyan | Double blink | Connected to WiFi, connecting to MQTT |
-| Green | Solid | Online and idle (IDLE state) |
-| Green | Breathing | Armed, waiting for player interaction |
+| Green | Solid | Online and READY |
+| Yellow | Slow pulse (1 Hz) | Online but NOT_READY |
 | White | Slow pulse | Countdown running |
 | Yellow | Fast blink (4 Hz) | Paused |
 | Red | Solid (3 seconds) | Wrong wire / penalty |
@@ -320,26 +517,76 @@ WebSocket pushes the same JSON events as MQTT in real time. Useful for a technic
 
 | Parameter | Default | Configurable Via |
 |-----------|---------|-----------------|
-| Countdown time | 300 seconds (5:00) | MQTT, Web UI |
-| Wire sequence | [1, 2, 3, 4] | MQTT, Web UI |
-| Penalty mode | `time_penalty` | MQTT, Web UI |
+| Countdown time | 3600 seconds (60:00) | MQTT, Web UI |
+| Input labels | `INPUT_1=red`, `INPUT_2=green`, `INPUT_3=yellow`, `INPUT_4=blue` | Web UI |
+| Solution vector | `"1234"` | MQTT, Web UI |
+| Required sequence length | 4 | MQTT, Web UI |
+| Wrong-wire mode | `penalty` | MQTT, Web UI |
 | Penalty amount | 30 seconds | MQTT, Web UI |
-| Timer sync interval | 10 seconds | Web UI |
-| Beep volume | 80% | Web UI |
+| Max tries | 3 | MQTT, Web UI |
+| Lid mode | `ignore` | MQTT, Web UI |
+| Debounce check interval | 10 ms | Web UI |
+| Debounce consecutive reads | 5 | Web UI |
+| Heartbeat interval | 10 seconds | Web UI |
+| Heartbeat topic | `paradox/state` | Web UI |
+| Low-battery threshold | 40% capacity | Web UI |
+| LED brightness | 80% | Web UI |
 | WiFi AP timeout | 30 seconds | Web UI |
-| Heartbeat interval | 30 seconds | Web UI |
+| Success sound | `beeps` | Web UI |
+| Failure sound | `buzz` | Web UI |
+| Success melody | `C6-8,D6-8,E6-4` | Web UI |
+| Failure melody | `E5-4,D5-4,C5-4,B4-4` | Web UI |
+| Power-save mode | `displayBlank` | Web UI |
+| Deep-sleep window | 30 seconds | Web UI |
+| Max idle cycle | 300 seconds | Web UI |
+| Keep-sync enabled | Disabled | Web UI |
+| Game state topic | `paradox/game/state` | Web UI |
+| Command topic | `paradox/game/zone/commands` | Web UI |
+| State topic | `paradox/game/zone/state` | Web UI |
+| Events topic | `paradox/game/zone/events` | Web UI |
+| Warnings topic | `paradox/game/zone/warnings` | Web UI |
+| Time tolerance (keep-sync) | 1000 ms | Web UI |
+| Keep-sync max drift | 1 second | Web UI |
+| Command dedupe window | 750 ms | Web UI |
+
+### 10.1 Battery Profiles
+
+Battery profiles are defined in the persistent configuration file as voltage-to-capacity lookup arrays.
+
+Required initial profiles:
+
+- `6v-lead-acid`
+- `6v-LiFePO4`
+- `12v-lead-acid`
+- `12v-LiFePO4`
+
+Each profile maps measured battery voltage to approximate remaining capacity (%). Low-battery warnings trigger when computed capacity falls below `lowBatteryPercent` (default 40).
 
 ---
 
-## 11. Open Questions
+## 11. Open Questions and Clarifications
 
-<!-- Mark: dump anything you're unsure about here. We'll resolve these before finalizing. -->
+### Resolved from Latest Review
 
-- [ ] Should the countdown timer display show tenths of a second in the final 60s?
-- [ ] Should there be a "hint" mode where the display flashes the next correct wire color?
-- [ ] How should the prop behave if WiFi drops mid-game? (Proposal: continue locally, buffer events, replay when reconnected)
-- [ ] Should the prop support multiple puzzle modes beyond wire defusal in v1.0, or keep it single-purpose?
-- [ ] What is the minimum battery life requirement? 4 hours? 8 hours? Full day?
-- [ ] Should the lid switch be required, or optional? (Some theming may not have a lid)
-- [ ] Should wires be re-connectable? (i.e., can a player plug a wire back in and try again?)
-- [ ] Maximum number of wires? Is 4 always enough, or should it support 6–8?
+- No tenths-of-a-second display; keep 4-digit `MM:SS` with blinking colon behavior.
+- No hint mode in v1.
+- On connectivity loss, continue locally and replay buffered timestamped events after reconnect.
+- Keep v1 single-purpose (wire defusal), but leave architecture open for future I/O expansion.
+- Target battery runtime is 8+ hours; power-saving strategy will be refined separately.
+- Lid switch is optional and defaults to `ignore`.
+- Wire reconnection behavior applies only in `buzz` and `penalty` modes.
+- Support up to 8 wires in architecture, with sequence length configurable from 1 to wire count.
+- Reconnection backoff: exponential 1s → 2s → 4s → 8s → 16s → 32s (capped), resets to 1s after successful reconnect.
+- Solve/fail commands only accepted during active countdown/paused states.
+- Keep-sync watches game state and syncs local time/mode automatically within ±1s drift.
+- MML-format melodies for success/failure (examples provided in Section 6.6.1).
+
+### Persistence Model Question Clarification
+
+**Persistence model** refers to how configuration is saved and loaded across device reboots:
+
+1. **NVS-only:** Use ESP32's encrypted key-value storage. Fast, secure, but opaque (not human-readable).
+2. **JSON-file-only:** Store config in a JSON file on SPIFFS/FAT. Human-readable, editable offline, slower.
+3. **Hybrid (NVS + JSON mirror):** Keep config in both places for speed + inspectability. More complex.
+
+**Chosen approach:** JSON configuration file in SPIFFS. The web UI saves changes to the JSON file. On boot, the device loads config from the file into runtime structures.

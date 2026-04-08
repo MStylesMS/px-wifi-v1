@@ -1,12 +1,15 @@
 #include "web_ui.h"
 
 #include <string.h>
+#include <stdio.h>
 #include "esp_event.h"
+#include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "web_ui";
@@ -33,6 +36,39 @@ static esp_err_t index_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t state_get_handler(httpd_req_t *req)
+{
+    uint8_t mac[6];
+    ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_AP, mac));
+
+    const esp_app_desc_t *app = esp_app_get_description();
+    int64_t uptime_us = esp_timer_get_time();
+    int uptime_s = (int)(uptime_us / 1000000);
+
+    char payload[512];
+    int len = snprintf(
+        payload,
+        sizeof(payload),
+        "{\"ts\":%lld,\"id\":\"px-wifi-v1\",\"status\":\"online\","
+        "\"uptime\":%d,\"version\":\"%s\",\"buildId\":\"%s\","
+        "\"buildDate\":\"%s\",\"buildTime\":\"%s\",\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\"}",
+        (long long)(uptime_us / 1000),
+        uptime_s,
+        app->version,
+        app->version,
+        app->date,
+        app->time,
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    if (len < 0 || len >= (int)sizeof(payload)) {
+        ESP_LOGE(TAG, "State payload format failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t ws_handler(httpd_req_t *req)
@@ -154,6 +190,14 @@ esp_err_t web_ui_start(void)
         .supported_subprotocol = NULL,
     };
     httpd_register_uri_handler(server, &ws_uri);
+
+    httpd_uri_t state_uri = {
+        .uri = "/api/state",
+        .method = HTTP_GET,
+        .handler = state_get_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &state_uri);
 
     ESP_LOGI(TAG, "HTTP server started");
     return ESP_OK;

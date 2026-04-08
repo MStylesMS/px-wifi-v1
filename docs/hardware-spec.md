@@ -60,16 +60,18 @@ Reference: https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/es
 
 ### 3.1 GPIO Inputs (Wiring Harness — 8 channels)
 
-| Function | Pin Name | Notes |
-|----------|----------|-------|
-| Wire 1 / Input 1 | `RED_WIRE` | Internal pull-up, active low. Switchable to output. |
-| Wire 2 / Input 2 | `GRN_WIRE` | Internal pull-up, active low. Switchable to output. |
-| Wire 3 / Input 3 | `YLW_WIRE` | Internal pull-up, active low. Switchable to output. |
-| Wire 4 / Input 4 | `BLU_WIRE` | Internal pull-up, active low. Switchable to output. |
-| Input 5 | `AUX_IN_1` | Input only. |
-| Input 6 | `AUX_IN_2` | Input only. |
-| Input 7 | `AUX_IN_3` | Input only. |
-| Input 8 (Lid switch) | `LID_SWITCH` | Input only. Internal pull-up, active low. |
+| Index | Pin Name | Name (default) | Notes |
+|-------|----------|----------------|-------|
+| 1 | `INPUT_1` | `red` | Internal pull-up, active low. Switchable to output. |
+| 2 | `INPUT_2` | `green` | Internal pull-up, active low. Switchable to output. |
+| 3 | `INPUT_3` | `yellow` | Internal pull-up, active low. Switchable to output. |
+| 4 | `INPUT_4` | `blue` | Internal pull-up, active low. Switchable to output. |
+| 5 | `INPUT_5` | `aux_1` | Input only. |
+| 6 | `INPUT_6` | `aux_2` | Input only. |
+| 7 | `INPUT_7` | `aux_3` | Input only. |
+| 8 | `INPUT_8` | `lid_switch` | Input only. Internal pull-up, active low. |
+
+`Name` is a configurable label stored in runtime configuration. Puzzle solutions reference input indexes (example: `"3124"`).
 
 ### 3.2 Low-Power Outputs (4 channels)
 
@@ -136,24 +138,25 @@ Reference: https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/es
 
 | Parameter | Value |
 |-----------|-------|
-| Type | 4-digit 7-segment LED display |
+| Type | Adafruit 0.56 in 4-digit 7-segment LED display with HT16K33 I2C backpack (or equivalent HT16K33 module) |
 | Interface | I2C |
-| Driver IC | TBD (e.g., HT16K33, TM1637 via adapter, or Adafruit backpack) |
+| Driver IC | HT16K33 |
 | Digit format | `MM:SS` with colon |
 | Color | TBD (red, green, or blue — depends on theming) |
 | Voltage | 5V (from I2C port) |
-| Part number | TBD |
+| Part number | Adafruit PID 1002 (white display option) or color-equivalent HT16K33 variant |
 
 ### 4.2 Piezo Buzzer
 
 | Parameter | Value |
 |-----------|-------|
-| Type | Active or passive piezoelectric buzzer |
-| Drive | PWM from ESP32 GPIO (passive) or GPIO on/off (active) |
-| Frequency range | 1–5 kHz (passive), fixed frequency (active) |
-| Voltage | 3.3V or 5V (depending on buzzer selection) |
-| Driver circuit | Direct GPIO (if 3.3V buzzer) or NPN transistor switch (if 5V) |
-| Part number | TBD |
+| Type | SunFounder Passive Buzzer Module |
+| Drive | PWM square wave from ESP32 GPIO |
+| Frequency range | 2-5 kHz recommended drive range |
+| Voltage | 3-5V |
+| Driver circuit | Module includes S8550 PNP transistor stage; verify final board drive/current in prototype tests |
+| Part number | SunFounder Passive Buzzer Module (SKU TS0210D, per vendor listing) |
+| Product page | https://www.sunfounder.com/products/passive-buzzer-module?_pos=2&_sid=7821e2f95&_ss=r |
 
 ### 4.3 Wire Connectors
 
@@ -177,7 +180,7 @@ Reference: https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/es
 |-----------|-------|
 | Type | Microswitch or magnetic reed switch |
 | Wiring | NO (normally open) — closes when lid is closed, opens when lid is lifted |
-| GPIO | Input 8 (shared with wiring harness) |
+| GPIO | `INPUT_8` (shared with wiring harness) |
 
 ---
 
@@ -212,8 +215,8 @@ Reference: https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/es
 | Qty | Component | Part Number | Notes | Est. Cost |
 |-----|-----------|-------------|-------|-----------|
 | 1 | ESP32-S3-DevKitC-1 v1.0 | — | Development board (prototype only) | ~$10 |
-| 1 | 4-digit 7-segment display (I2C) | TBD | With HT16K33 or similar driver | ~$5 |
-| 1 | Piezo buzzer | TBD | Passive, 3.3V compatible | ~$1 |
+| 1 | Adafruit 0.56 in 4-digit 7-segment I2C display | PID 1002 (or equivalent) | HT16K33-based display module | ~$11 |
+| 1 | SunFounder Passive Buzzer Module | TS0210D | Passive buzzer module, 3-5V, PWM-driven | ~$7 |
 | 4 | Colored wire assemblies | — | Red, blue, yellow, green w/ connectors | ~$3 |
 | 1 | Microswitch (lid) | — | NO type, lever actuator | ~$1 |
 | 1 | Wiring harness connector | TBD | JST-XH or screw terminal | ~$2 |
@@ -232,7 +235,12 @@ Store relevant datasheets in `docs/datasheets/`. Key ones to collect:
 
 - [ ] ESP32-S3-WROOM-1 module datasheet
 - [ ] ESP32-S3 technical reference manual
-- [ ] 7-segment display + driver IC datasheet
-- [ ] Piezo buzzer datasheet
+- [ ] Adafruit HT16K33 7-segment display docs/datasheet package
+- [ ] SunFounder passive buzzer module technical datasheet (if published separately)
 - [ ] Voltage regulator datasheet
 - [ ] Wiring harness connector datasheet
+
+Current references:
+
+- Adafruit LED Backpack downloads (datasheets/schematic): https://learn.adafruit.com/adafruit-led-backpack/downloads
+- SunFounder Passive Buzzer Module product page: https://www.sunfounder.com/products/passive-buzzer-module?_pos=2&_sid=7821e2f95&_ss=r

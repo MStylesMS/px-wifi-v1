@@ -2,20 +2,21 @@
 #include "px_system.h"
 #include "drv_rgb_led.h"
 #include "web_ui.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 
 static const char *TAG = "px-wifi-v1";
 
 static const rgb_color_t colors[] = {
     {  0,   0,   0},   /* off     */
-    {127,   0,   0},   /* red     */
-    {127, 127,   0},   /* yellow  */
-    {  0, 127,   0},   /* green   */
-    {  0, 127, 127},   /* cyan    */
-    {  0,   0, 127},   /* blue    */
-    {127,   0, 127},   /* magenta */
+    {63,   0,   0},   /* red     */
+    {63, 63,   0},   /* yellow  */
+    {  0, 63,   0},   /* green   */
+    {  0, 63, 63},   /* cyan    */
+    {  0,   0, 63},   /* blue    */
+    {63,   0, 63},   /* magenta */
     {  0,   0,   0},   /* off     */
-    {127, 127, 127},   /* white   */
+    {63, 63, 63},   /* white   */
 };
 
 #define NUM_COLORS  (sizeof(colors) / sizeof(colors[0]))
@@ -25,6 +26,9 @@ static const rgb_color_t colors[] = {
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting px-wifi-v1");
+
+    const esp_app_desc_t *app = esp_app_get_description();
+    ESP_LOGI(TAG, "Build info: id=%s date=%s time=%s", app->version, app->date, app->time);
 
     ESP_ERROR_CHECK(px_system_init());
 
