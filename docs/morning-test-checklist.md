@@ -13,6 +13,31 @@ This checklist covers the three deferred validation steps:
 - Mac is connected to the prop SoftAP `Paradox-PXWiFiV1-9A51`.
 - Device API base URL is `http://192.168.4.1`.
 
+Optional macOS helper:
+
+- `scripts/macos_ap_test_runner.py` can connect to prop AP, run one or more test phases, and reconnect to home Wi-Fi.
+- Example (run smoke + commands, then reconnect to TMOBILE):
+
+```sh
+python3 scripts/macos_ap_test_runner.py \
+	--prop-ssid Paradox-PXWiFiV1-9A51 \
+	--phases smoke commands \
+	--home-ssid TMOBILE
+```
+
+- If AP association is slow, increase readiness wait:
+
+```sh
+python3 scripts/macos_ap_test_runner.py \
+  --prop-ssid Paradox-PXWiFiV1-9A51 \
+  --phases smoke commands \
+  --connect-timeout 60 \
+  --home-ssid TMOBILE
+```
+```
+
+- To run `persist-check`, reboot the device manually first, then run again with `--phases persist-check`.
+
 ## Smoke Test
 
 Run:

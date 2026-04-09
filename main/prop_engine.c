@@ -113,6 +113,8 @@ typedef struct {
 
 static prop_ctx_t s_ctx;
 
+static void prop_engine_get_state_json_unlocked(char *out, size_t out_size);
+
 static int64_t now_ms(void)
 {
     return esp_timer_get_time() / 1000;
@@ -1253,10 +1255,15 @@ esp_err_t prop_engine_init(void)
 
 void prop_engine_get_state_json(char *out, size_t out_size)
 {
+    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    prop_engine_get_state_json_unlocked(out, out_size);
+    xSemaphoreGive(s_ctx.lock);
+}
+
+static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
+{
     const esp_app_desc_t *app = esp_app_get_description();
     int64_t ts;
-
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
     ts = now_ms();
 
     snprintf(out,
@@ -1307,8 +1314,6 @@ void prop_engine_get_state_json(char *out, size_t out_size)
              app->version,
              app->date,
              app->time);
-
-    xSemaphoreGive(s_ctx.lock);
 }
 
 void prop_engine_get_config_json(char *out, size_t out_size)
@@ -1449,7 +1454,7 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
     }
 
     if (strcmp(cmd, "getState") == 0) {
-        prop_engine_get_state_json(response, response_size);
+        prop_engine_get_state_json_unlocked(response, response_size);
         return ESP_OK;
     }
 

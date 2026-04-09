@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -33,6 +34,19 @@ def ensure(condition, message):
         raise RuntimeError(message)
 
 
+def request_json_with_retry(method, url, payload=None, timeout=5.0, retries=3, retry_delay=0.75):
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            return request_json(method, url, payload=payload, timeout=timeout)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_exc = exc
+            if attempt == retries:
+                break
+            time.sleep(retry_delay)
+    raise last_exc
+
+
 def run_smoke(base_url):
     print_step("GET /api/state")
     status, state = request_json("GET", f"{base_url}/api/state")
@@ -55,7 +69,14 @@ def run_smoke(base_url):
     print_json("pong", pong)
 
     print_step("POST /api/command getState")
-    status, state_via_command = request_json("POST", f"{base_url}/api/command", {"command": "getState"})
+    status, state_via_command = request_json_with_retry(
+        "POST",
+        f"{base_url}/api/command",
+        {"command": "getState"},
+        timeout=10.0,
+        retries=3,
+        retry_delay=1.0,
+    )
     ensure(status == 200, f"getState command returned HTTP {status}")
     ensure("gameState" in state_via_command, "getState command missing gameState")
     print_json("state via command", state_via_command)
