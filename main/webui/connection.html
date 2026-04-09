@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PX-WiFi-V1 Connection</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <header class="topbar wrap">
+        <div class="brand">
+            <img src="assets/logo.png" alt="Logo" class="brand-logo" onerror="this.style.display='none'">
+            <div>
+                <p class="kicker">Paradox Prop Console</p>
+                <h1>Connection</h1>
+            </div>
+        </div>
+        <nav class="tabs">
+            <a class="tab" href="index.html">Live</a>
+            <a class="tab" href="config.html">Config</a>
+            <a class="tab active" href="connection.html">Connection</a>
+        </nav>
+    </header>
+
+    <main class="wrap layout single">
+        <section class="panel wide">
+            <div class="panel-head">
+                <h2>WiFi Connection</h2>
+                <div class="row-actions">
+                    <button id="scanWifi" class="btn btn-ghost">Scan SSIDs</button>
+                </div>
+            </div>
+            <div class="form-grid">
+                <label>SSID<input id="wifiSsid" type="text" maxlength="32"></label>
+                <label>Password<input id="wifiPassword" type="password" maxlength="64"></label>
+            </div>
+            <p class="hint">Available networks refresh every 10 seconds automatically.</p>
+            <div class="panel" style="margin-top:0.8rem;">
+                <h3>Available SSIDs</h3>
+                <div id="ssidList" class="ssid-list"></div>
+            </div>
+        </section>
+
+        <section class="panel wide">
+            <div class="panel-head">
+                <h2>Device Details</h2>
+                <div class="row-actions">
+                    <button id="refreshDetails" class="btn btn-ghost">Refresh</button>
+                </div>
+            </div>
+            <div class="detail-grid">
+                <div class="detail-item"><span>Prop Name (id)</span><strong id="detailPropName">-</strong></div>
+                <div class="detail-item"><span>IP Address</span><strong id="detailIpAddress">-</strong></div>
+                <div class="detail-item"><span>Software Version</span><strong id="detailSoftwareVersion">-</strong></div>
+                <div class="detail-item"><span>Build Number</span><strong id="detailBuildNumber">-</strong></div>
+                <div class="detail-item"><span>Build Date</span><strong id="detailBuildDate">-</strong></div>
+                <div class="detail-item"><span>CPU Temp</span><strong id="detailCpuTemp">-</strong></div>
+                <div class="detail-item"><span>Free Memory</span><strong id="detailFreeMemory">-</strong></div>
+                <div class="detail-item"><span>Battery</span><strong id="detailBattery">-</strong></div>
+            </div>
+            <div class="form-grid" style="margin-top:0.8rem;">
+                <label>Network Name
+                    <div class="input-suffix-wrap">
+                        <input id="networkName" type="text" maxlength="32" placeholder="px-wifi-v1-1a2b">
+                        <span class="input-suffix">.local</span>
+                    </div>
+                </label>
+                <div class="device-apply-wrap">
+                    <button id="applyDeviceName" class="btn">Apply</button>
+                </div>
+            </div>
+            <pre id="deviceLog" class="log"></pre>
+        </section>
+
+        <section class="panel wide">
+            <div class="panel-head">
+                <h2>MQTT Connection</h2>
+                <div class="row-actions">
+                    <button id="loadConnection" class="btn btn-ghost">Load</button>
+                    <button id="saveConnection" class="btn">Apply</button>
+                </div>
+            </div>
+            <div class="form-grid">
+                <label>Broker Host<input id="mqttHost" type="text" maxlength="127"></label>
+                <label>Broker Port<input id="mqttPort" type="number" min="1" max="65535"></label>
+                <label>Username<input id="mqttUsername" type="text" maxlength="63"></label>
+                <label>Password<input id="mqttPassword" type="password" maxlength="63"></label>
+                <label>Base Topic<input id="mqttBaseTopic" type="text" maxlength="95"></label>
+            </div>
+            <pre id="connectionLog" class="log"></pre>
+        </section>
+
+        <section class="panel wide">
+            <div class="panel-head">
+                <h2>MQTT Topic Settings</h2>
+            </div>
+            <div class="form-grid">
+                <label>Commands Topic<input id="mqttCommandTopic" type="text" maxlength="127"></label>
+                <label>State Topic<input id="mqttStateTopic" type="text" maxlength="127"></label>
+                <label>Events Topic<input id="mqttEventsTopic" type="text" maxlength="127"></label>
+                <label>Warnings Topic<input id="mqttWarningsTopic" type="text" maxlength="127"></label>
+                <label>Game State Topic<input id="mqttGameStateTopic" type="text" maxlength="127"></label>
+                <label>Prop State Topic<input id="mqttPropStateTopic" type="text" maxlength="127"></label>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+    <script>
+        window.PX.pageConnection();
+    </script>
+</body>
+</html>

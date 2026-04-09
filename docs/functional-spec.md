@@ -227,9 +227,9 @@ Players encounter a prop (themed as a bomb, security panel, junction box, etc.) 
 |-------------|--------|
 | Supported wire count | v1 supports 4 wires; architecture must support up to 8 wires in future |
 | Input identity model | Inputs are indexed and named separately: `INPUT_1..INPUT_8` + user label (`Name`) |
-| Default input names | `INPUT_1=red`, `INPUT_2=green`, `INPUT_3=yellow`, `INPUT_4=blue` |
-| Correct order | Configurable disconnect order via solution vector string (default `"1234"`) |
-| Required sequence length | Configurable from 1 to total wire count; wires not in sequence must remain connected |
+| Default input names | `INPUT_1=red`, `INPUT_2=green`, `INPUT_3=yellow`, `INPUT_4=blue`, `INPUT_5=white`, `INPUT_6=orange`, `INPUT_7=brown`, `INPUT_8=purple` |
+| Correct order | Configurable disconnect order via solution vector string (default `"1234"`); only digits `1-8` are allowed, max length 8 |
+| Required sequence length | Derived automatically from `solution` vector length |
 | Wrong wire mode | Configurable via `setMode`: `buzz`, `penalty`, `instant` |
 | Time penalty amount | Configurable (default: 30 seconds deducted) |
 | Penalty edge handling | If remaining time <30s: detonate immediately. If 30-60s: set remaining time to 20s |
@@ -405,7 +405,7 @@ All communication follows the **Paradox v2 MQTT Protocol** (see `PR_PX_APP_COMM_
 | `resume` | `{"command": "resume"}` | Alias of `start`; begins countdown immediately from current timer value. |
 | `reset` | `{"command": "reset"}` | Return to READY/NOT_READY based on current wire connectivity. Clear round state. |
 | `setTime` | `{"command": "setTime", "time": 180}` | Update countdown to specific value (seconds). |
-| `setSequence` | `{"command": "setSequence", "solution": "3124", "wireCount": 4, "requiredLength": 4}` | Set required disconnect order by input index vector string. |
+| `setSequence` | `{"command": "setSequence", "solution": "3124", "wireCount": 4}` | Set required disconnect order by input index vector string. Sequence length is derived from `solution`. |
 | `setMode` | `{"command": "setMode", "mode": "penalty", "maxTries": 3}` | Configure wrong-wire mode and retry limit for active round. |
 | `setPenalty` | `{"command": "setPenalty", "amount": 30}` | Configure time penalty seconds for active round. |
 | `setLidMode` | `{"command": "setLidMode", "mode": "ignore|normallyOpen|normallyClosed"}` | Set lid behavior for active round. |
@@ -468,30 +468,74 @@ If WiFi or MQTT drops mid-game, the prop continues locally. Events are buffered 
 
 ## 8. Web Interface
 
-### 8.1 Configuration Page (`http://<device-ip>/`)
+### 8.1 Configuration Page (`http://<device-ip>/config.html`)
 
 | Section | Fields |
 |---------|--------|
 | **Network** | WiFi SSID, Password, MQTT broker address, MQTT port |
 | **Identity** | Site name, Zone name, Device ID |
-| **Puzzle** | Default countdown time, Wire count, Required sequence length, Wire sequence, Wrong-wire mode, Penalty amount, Max tries, Lid mode |
+| **Puzzle** | Default countdown time, Wire count, Wire sequence, Wrong-wire mode, Penalty amount, Max tries, Lid mode |
 | **Inputs** | Input labels (`INPUT_1..INPUT_8` names), active input count, solution vector string |
 | **Audio** | Success sound option, Success melody string, Failure sound option, Failure melody string |
-| **Input Filtering** | Debounce check interval (ms), consecutive readings threshold |
-| **Display/LED** | LED brightness (default 80%) |
+| **Input Filtering** | (Developer only in config file) Debounce check interval (ms), consecutive readings threshold |
+| **Display/LED** | (Developer only in config file) LED brightness (default 20%) |
 | **Battery** | Battery profile, Low-battery threshold (%) |
-| **Power Save** | Power-save mode (`none`, `displayBlank`, `displayRailGated`, `lightSleep`, `deepSleep`), sleep window (default 30s), max idle cycle (default 300s), pre-start wake window |
-| **Sync** | Keep-sync enable, controller state topic, max allowed drift (default 1s) |
+| **Power Save** | Power-save mode (`none`, `displayBlank`, `displayRailGated`, `lightSleep`, `deepSleep`), pre-start wake window |
+| **Sync** | Keep-sync enable, controller state topic |
 | **Telemetry** | Heartbeat publish interval (default 10s) |
 | **System** | Firmware version, Uptime, Free heap, OTA update URL + trigger |
+
+At the bottom of the Configuration page, include a **Raw JSON Command** pane (POST `/api/command`) for developer diagnostics.
+
+There is no separate Commands page in the v1 Web UI.
 
 `Save` on this page updates persistent defaults stored in a local configuration file loaded at boot.
 
 MQTT (or other comms) parameter updates are temporary for the current runtime/session unless explicitly saved via the configuration UI/API.
 
-### 8.2 Live Status (`ws://<device-ip>/ws`)
+Connection page includes explicit MQTT topic fields at the bottom of the MQTT panel:
+
+- `commands`
+- `state`
+- `events`
+- `warnings`
+- `game_state_topic`
+- `prop_state_topic`
+
+Connection page layout order:
+
+1. WiFi Connection
+2. Device Details
+3. MQTT Connection
+4. MQTT Topic Settings
+
+WiFi scan behavior on Connection page:
+
+- SSID scan runs automatically every 10 seconds.
+- Manual `Scan SSIDs` remains available.
+- Signal strength is shown as bar icon + RSSI dBm.
+
+Icon style:
+
+- WiFi and battery indicators use a matching line-icon visual style for consistency.
+- Battery icon uses graphical fill level + color to indicate charge/warning status.
+
+Device Details panel fields:
+
+- Read-only: Prop Name (id), IP Address, Software Version, Build Number, Build Date, CPU Temp (if available), Free Memory, current battery percentage.
+- Editable: Network Name (mDNS host label) with `.local` suffix shown in UI.
+- Apply action updates mDNS hostname at runtime.
+
+mDNS hostname behavior:
+
+- Default network name is derived from prop id with a unique suffix (e.g. `px-wifi-v1-a1b2`), so URL resolves as `http://px-wifi-v1-a1b2.local`.
+- User may override network name from Connection page.
+
+### 8.2 Live Status (`http://<device-ip>/index.html`, `ws://<device-ip>/ws`)
 
 WebSocket pushes the same JSON events as MQTT in real time. Useful for a technician standing next to the prop with a phone — no MQTT broker needed for local debugging.
+
+In the Live panel, **Tries Used** is shown only when mode is `buzz` or `penalty`. It is hidden for `instant` mode.
 
 ---
 
@@ -518,36 +562,38 @@ WebSocket pushes the same JSON events as MQTT in real time. Useful for a technic
 | Parameter | Default | Configurable Via |
 |-----------|---------|-----------------|
 | Countdown time | 3600 seconds (60:00) | MQTT, Web UI |
-| Input labels | `INPUT_1=red`, `INPUT_2=green`, `INPUT_3=yellow`, `INPUT_4=blue` | Web UI |
+| Input labels | `INPUT_1=red`, `INPUT_2=green`, `INPUT_3=yellow`, `INPUT_4=blue`, `INPUT_5=white`, `INPUT_6=orange`, `INPUT_7=brown`, `INPUT_8=purple` | Web UI |
 | Solution vector | `"1234"` | MQTT, Web UI |
-| Required sequence length | 4 | MQTT, Web UI |
+| Required sequence length | Derived from `solution` length | Derived |
 | Wrong-wire mode | `penalty` | MQTT, Web UI |
 | Penalty amount | 30 seconds | MQTT, Web UI |
 | Max tries | 3 | MQTT, Web UI |
 | Lid mode | `ignore` | MQTT, Web UI |
-| Debounce check interval | 10 ms | Web UI |
-| Debounce consecutive reads | 5 | Web UI |
+| Debounce check interval | 10 ms | Config file only |
+| Debounce consecutive reads | 5 | Config file only |
 | Heartbeat interval | 10 seconds | Web UI |
 | Heartbeat topic | `paradox/state` | Web UI |
 | Low-battery threshold | 40% capacity | Web UI |
-| LED brightness | 80% | Web UI |
-| WiFi AP timeout | 30 seconds | Web UI |
+| LED brightness | 20% | Config file only |
+| WiFi AP timeout | 30 seconds | Config file only |
 | Success sound | `beeps` | Web UI |
 | Failure sound | `buzz` | Web UI |
 | Success melody | `C6-8,D6-8,E6-4` | Web UI |
 | Failure melody | `E5-4,D5-4,C5-4,B4-4` | Web UI |
 | Power-save mode | `displayBlank` | Web UI |
-| Deep-sleep window | 30 seconds | Web UI |
-| Max idle cycle | 300 seconds | Web UI |
+| Deep-sleep window | 30 seconds | Config file only |
+| Max idle cycle | 300 seconds | Config file only |
 | Keep-sync enabled | Disabled | Web UI |
 | Game state topic | `paradox/game/state` | Web UI |
 | Command topic | `paradox/game/zone/commands` | Web UI |
 | State topic | `paradox/game/zone/state` | Web UI |
 | Events topic | `paradox/game/zone/events` | Web UI |
 | Warnings topic | `paradox/game/zone/warnings` | Web UI |
-| Time tolerance (keep-sync) | 1000 ms | Web UI |
-| Keep-sync max drift | 1 second | Web UI |
-| Command dedupe window | 750 ms | Web UI |
+| Time tolerance (keep-sync) | 1000 ms | Config file only |
+| Keep-sync max drift | 1 second (1000 ms) | Config file only |
+| Command dedupe window | 750 ms | Config file only |
+| Battery profile default | `unknown` | Web UI |
+| mDNS network name | Derived from prop id + unique suffix | Web UI |
 
 ### 10.1 Battery Profiles
 
@@ -559,8 +605,24 @@ Required initial profiles:
 - `6v-LiFePO4`
 - `12v-lead-acid`
 - `12v-LiFePO4`
+- `external`
+- `unknown`
 
 Each profile maps measured battery voltage to approximate remaining capacity (%). Low-battery warnings trigger when computed capacity falls below `lowBatteryPercent` (default 40).
+
+Battery profile storage also includes voltage-divider calibration and raw ADC correlation:
+
+- `adcAt0V`: ADC raw reading corresponding to 0V input
+- `adcAt15V`: ADC raw reading corresponding to 15V input
+- `adcRaw`: current/raw sampled ADC value
+
+Runtime voltage is calculated by linear interpolation between those calibration points, then used for battery capacity interpolation.
+
+For `external` and `unknown` profiles:
+
+- Battery displays as `100%`
+- Status remains green unless interpolated voltage drops below 5.0V
+- If voltage drops below 5.0V, status switches to warning (orange)
 
 ---
 

@@ -1,0 +1,460 @@
+:root {
+    --ink: #19202d;
+    --muted: #5b6779;
+    --paper: #f4f2ee;
+    --panel: rgba(255, 255, 255, 0.78);
+    --line: rgba(25, 32, 45, 0.14);
+    --accent: #d94f2b;
+    --accent-soft: #f5b08d;
+    --ok: #2f8f74;
+    --warn: #b57500;
+    --bad: #b23a3a;
+    --shadow: 0 20px 40px rgba(20, 28, 43, 0.12);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    color: var(--ink);
+    font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+    background: radial-gradient(circle at 5% 5%, #ffd8bf, transparent 30%),
+        radial-gradient(circle at 100% 0%, #c4efe5, transparent 35%),
+        var(--paper);
+    min-height: 100vh;
+}
+
+h1, h2, h3 {
+    font-family: "Bricolage Grotesque", "Trebuchet MS", sans-serif;
+    margin: 0;
+}
+
+.bg-grid {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.22;
+    background-image: linear-gradient(var(--line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 28px 28px;
+}
+
+.wrap {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 1rem;
+}
+
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    backdrop-filter: blur(8px);
+}
+
+.battery-badge {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    padding: 0.35rem 0.75rem;
+    font-weight: 700;
+    background: rgba(255, 255, 255, 0.82);
+}
+
+.battery-good {
+    color: var(--ok);
+}
+
+.battery-warn {
+    color: var(--warn);
+}
+
+.battery-icon {
+    width: 22px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+}
+
+.battery-svg {
+    width: 22px;
+    height: 14px;
+    display: block;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.brand-logo {
+    width: 44px;
+    height: 44px;
+    object-fit: contain;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.7);
+    border: 1px solid var(--line);
+}
+
+.kicker {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.tabs {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.tab {
+    text-decoration: none;
+    color: var(--ink);
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.7);
+    padding: 0.5rem 0.85rem;
+    border-radius: 999px;
+    font-weight: 600;
+}
+
+.tab.active {
+    background: var(--ink);
+    color: #fff;
+}
+
+.layout {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 1rem;
+    align-items: start;
+    margin-top: 1rem;
+}
+
+.layout.single {
+    grid-template-columns: 1fr;
+}
+
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    box-shadow: var(--shadow);
+    padding: 1rem;
+    animation: rise 420ms ease both;
+}
+
+.panel.wide {
+    grid-column: 1 / -1;
+}
+
+.panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.9rem;
+}
+
+.row-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.badge {
+    border-radius: 999px;
+    padding: 0.35rem 0.7rem;
+    background: #fff;
+    border: 1px solid var(--line);
+    text-transform: capitalize;
+}
+
+.metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+}
+
+.metric {
+    background: rgba(255, 255, 255, 0.7);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.8rem;
+}
+
+.metric p {
+    margin: 0 0 0.35rem;
+    color: var(--muted);
+    font-size: 0.84rem;
+}
+
+.metric h3 {
+    font-size: 1.35rem;
+}
+
+.text-ok {
+    color: var(--ok);
+}
+
+.text-warn {
+    color: var(--warn);
+}
+
+.hidden {
+    display: none !important;
+}
+
+.btn-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+}
+
+.btn {
+    border: 1px solid transparent;
+    background: linear-gradient(160deg, var(--accent), #de6a46);
+    color: #fff;
+    font-weight: 700;
+    border-radius: 10px;
+    padding: 0.65rem 0.8rem;
+    cursor: pointer;
+}
+
+.btn:hover {
+    filter: saturate(1.1);
+}
+
+.btn:active {
+    transform: translateY(1px);
+}
+
+.btn-ghost {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.75);
+    border-color: var(--line);
+}
+
+.btn-warn {
+    background: linear-gradient(160deg, #d89d1b, #bf7f00);
+}
+
+.btn-danger {
+    background: linear-gradient(160deg, #d15151, #ab3030);
+}
+
+.inline-form {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+}
+
+input,
+select,
+textarea {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.58rem 0.65rem;
+    background: rgba(255, 255, 255, 0.86);
+    color: var(--ink);
+    font: inherit;
+}
+
+.inline-form input {
+    max-width: 300px;
+}
+
+.toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.toggle input {
+    width: auto;
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.7rem;
+}
+
+.form-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.92rem;
+}
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+}
+
+.detail-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.65);
+}
+
+.detail-item span {
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.input-suffix-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.input-suffix {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.45rem 0.55rem;
+    background: rgba(255, 255, 255, 0.68);
+    color: var(--muted);
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+.device-apply-wrap {
+    display: flex;
+    align-items: flex-end;
+}
+
+.ssid-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+}
+
+.ssid-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.55rem 0.65rem;
+    background: rgba(255, 255, 255, 0.72);
+    cursor: pointer;
+}
+
+.ssid-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.wifi-icon {
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+}
+
+.wifi-svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+}
+
+.hint {
+    margin: 0.6rem 0 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.log {
+    margin-top: 0.8rem;
+    min-height: 120px;
+    max-height: 270px;
+    overflow: auto;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: #111722;
+    color: #d5deee;
+    padding: 0.8rem;
+    font-size: 0.85rem;
+    line-height: 1.35;
+}
+
+.pulse {
+    position: relative;
+    overflow: hidden;
+}
+
+.pulse::after {
+    content: "";
+    position: absolute;
+    inset: -40% auto auto -40%;
+    width: 180px;
+    height: 180px;
+    background: radial-gradient(circle, rgba(47, 143, 116, 0.24), transparent 68%);
+    animation: drift 5s ease-in-out infinite;
+}
+
+@keyframes rise {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes drift {
+    0%, 100% { transform: translate(0, 0); }
+    50% { transform: translate(16px, 14px); }
+}
+
+@media (max-width: 820px) {
+    .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .layout,
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .detail-grid,
+    .ssid-list {
+        grid-template-columns: 1fr;
+    }
+
+    .metrics,
+    .btn-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .inline-form input {
+        max-width: 100%;
+    }
+}

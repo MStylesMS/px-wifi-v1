@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PX-WiFi-V1 Config</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <header class="topbar wrap">
+        <div class="brand">
+            <img src="assets/logo.png" alt="Logo" class="brand-logo" onerror="this.style.display='none'">
+            <div>
+                <p class="kicker">Paradox Prop Console</p>
+                <h1>Configuration</h1>
+            </div>
+        </div>
+        <nav class="tabs">
+            <a class="tab" href="index.html">Live</a>
+            <a class="tab active" href="config.html">Config</a>
+            <a class="tab" href="connection.html">Connection</a>
+        </nav>
+    </header>
+
+    <main class="wrap layout single">
+        <section class="panel wide">
+            <div class="panel-head">
+                <h2>Runtime Config</h2>
+                <div class="row-actions">
+                    <button id="applyConfig" class="btn">Apply</button>
+                    <button id="saveConfig" class="btn btn-warn">Apply + Save</button>
+                    <button id="restoreDefaults" class="btn btn-ghost">Restore Defaults</button>
+                </div>
+            </div>
+            <form id="configForm" class="form-grid">
+                <label>1. Game Time (seconds)<input name="defaultTime" type="number" min="10"></label>
+                <label>2. Lid Detection
+                    <select name="lidMode">
+                        <option value="ignore">Ignore</option>
+                        <option value="normallyOpen">Normally Open</option>
+                        <option value="normallyClosed">Normally Closed</option>
+                    </select>
+                </label>
+                <label>3. Sync Mode
+                    <select name="keepSyncEnabled">
+                        <option value="true">Follow</option>
+                        <option value="false">Listen</option>
+                    </select>
+                </label>
+                <label>4. Solution Mode
+                    <select name="mode">
+                        <option value="buzz">Buzz</option>
+                        <option value="penalty">Penalty</option>
+                        <option value="instant">Instant</option>
+                    </select>
+                </label>
+                <label>5. Max Tries<input id="maxTries" name="maxTries" type="number" min="1" max="100"></label>
+                <label>6. Time Penalty (seconds)<input id="penalty" name="penalty" type="number" min="0" max="3600"></label>
+                <label>7. Number of Wires/Switches<input id="wireCount" name="wireCount" type="number" min="1" max="8"></label>
+                <label>8. Solution Order by ID<input name="solution" type="text" maxlength="8"></label>
+                <label>9. Input 1 Name<input name="input1Name" type="text"></label>
+                <label>10. Input 2 Name<input name="input2Name" type="text"></label>
+                <label>11. Input 3 Name<input name="input3Name" type="text"></label>
+                <label>12. Input 4 Name<input name="input4Name" type="text"></label>
+                <label>13. Input 5 Name<input name="input5Name" type="text"></label>
+                <label>14. Input 6 Name<input name="input6Name" type="text"></label>
+                <label>15. Input 7 Name<input name="input7Name" type="text"></label>
+                <label>16. Input 8 Name<input name="input8Name" type="text"></label>
+                <label>17. Heartbeat ms<input name="heartbeatInterval" type="number" min="100" step="100"></label>
+                <label>18. Battery Profile
+                    <select name="batteryProfile">
+                        <option value="6v-lead-acid">6V Lead-Acid</option>
+                        <option value="6v-LiFePO4">6V LiFePO4</option>
+                        <option value="12v-lead-acid">12V Lead-Acid</option>
+                        <option value="12v-LiFePO4">12V LiFePO4</option>
+                        <option value="external">External</option>
+                        <option value="unknown">Unknown</option>
+                    </select>
+                </label>
+                <label>19. Low Battery %<input name="lowBatteryPercent" type="number" min="0" max="100"></label>
+            </form>
+            <pre id="configLog" class="log"></pre>
+        </section>
+
+        <section class="panel wide">
+            <div class="panel-head">
+                <h2>Raw JSON Command</h2>
+                <button id="sendRaw" class="btn">Send</button>
+            </div>
+            <textarea id="rawCommand" rows="6">{"command":"getState"}</textarea>
+            <p class="hint">POST target: /api/command</p>
+            <pre id="rawLog" class="log"></pre>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+    <script>
+        window.PX.pageConfig();
+    </script>
+</body>
+</html>
