@@ -65,6 +65,8 @@
                 triesUsed: 0,
                 maxTries: 3,
                 mode: "penalty",
+                wireCount: 4,
+                connectedMask: 15,
                 battery: 100,
                 batteryVoltageMv: 5200,
                 batteryProfile: "unknown",
@@ -102,7 +104,7 @@
             if (path === "/api/device/details") {
                 return {
                     propName: "px-wifi-v1-a1b2",
-                    ipAddress: "192.168.4.1",
+                    ipAddress: "unavailable",
                     softwareVersion: "demo",
                     buildNumber: "demo-local",
                     buildDate: "2026-04-09 10:00:00",
@@ -110,7 +112,14 @@
                     freeMemoryBytes: 243712,
                     batteryPercent: 100,
                     networkName: "px-wifi-v1-a1b2",
-                    status: "ready"
+                    status: "ready",
+                    apIpAddress: "192.168.4.1",
+                    wifiConnected: false,
+                    wifiConnecting: false,
+                    wifiTargetSsid: "",
+                    wifiSsid: "",
+                    wifiRssi: -90,
+                    pendingApShutdown: false
                 };
             }
 
@@ -158,6 +167,7 @@
                 mqttGameStateTopic: "paradox/game/state",
                 mqttPropStateTopic: "paradox/state",
                 networkName: "px-wifi-v1-a1b2",
+                apIpAddress: "192.168.4.1",
                 apPassword: "",
                 apEnabled: true
             };
@@ -271,11 +281,10 @@
             if (details && details.wifiConnected) {
                 const level = wifiLevel(details.wifiRssi);
                 if (icon) { icon.innerHTML = tablerWifiSvg(level); }
-                if (text) { text.textContent = details.wifiSsid || "Connected"; }
             } else {
                 if (icon) { icon.innerHTML = tablerWifiSvg(0); }
-                if (text) { text.textContent = "No WiFi"; }
             }
+            if (text) { text.textContent = ""; }
         }
     }
 
@@ -375,11 +384,78 @@
     function pageDashboard() {
         const log = el("actionLog");
 
+        const STATE_UI = {
+            ready: { label: "Ready", cls: "state-ready" },
+            not_ready: { label: "Not Ready", cls: "state-not-ready" },
+            countdown: { label: "Running", cls: "state-running" },
+            paused: { label: "Paused", cls: "state-paused" },
+            defused: { label: "Solved", cls: "state-solved" },
+            detonated: { label: "Failed", cls: "state-failed" }
+        };
+
+        function applyGameStateVisuals(rawState) {
+            const key = String(rawState || "").toLowerCase();
+            const ui = STATE_UI[key] || { label: "Unknown", cls: "state-not-ready" };
+            const badge = el("stateBadge");
+            const panel = el("gameStatePanel");
+
+            if (badge) {
+                badge.textContent = ui.label;
+                badge.classList.remove(
+                    "state-ready",
+                    "state-not-ready",
+                    "state-running",
+                    "state-paused",
+                    "state-solved",
+                    "state-failed"
+                );
+                badge.classList.add(ui.cls);
+            }
+
+            if (panel) {
+                panel.classList.remove(
+                    "state-ready",
+                    "state-not-ready",
+                    "state-running",
+                    "state-paused",
+                    "state-solved",
+                    "state-failed"
+                );
+                panel.classList.add(ui.cls);
+            }
+        }
+
+        function renderInputIndicators(state) {
+            const container = el("inputIndicators");
+            if (!container) { return; }
+            const wireCount = Math.max(0, Math.min(8, Number(state.wireCount || 0)));
+            const mask = state.connectedMask != null ? Number(state.connectedMask) : ((1 << wireCount) - 1);
+            let connectedCount = 0;
+            container.innerHTML = "";
+            for (let i = 0; i < wireCount; i++) {
+                const dot = document.createElement("span");
+                dot.className = "input-dot";
+                dot.textContent = String(i + 1);
+                if (mask & (1 << i)) {
+                    dot.classList.add("connected");
+                    connectedCount++;
+                } else {
+                    dot.classList.add("disconnected");
+                }
+                container.appendChild(dot);
+            }
+
+            const summary = el("inputStatesSummary");
+            if (summary) {
+                summary.textContent = `${connectedCount}/${wireCount} Closed`;
+            }
+        }
+
         async function refreshState() {
             try {
                 const state = await api("/api/state");
                 const stateText = String(state.gameState || "unknown");
-                el("stateBadge").textContent = stateText;
+                applyGameStateVisuals(stateText);
                 el("timeRemaining").textContent = formatTime(state.timeRemaining);
                 el("triesUsed").textContent = `${state.triesUsed ?? "-"} / ${state.maxTries ?? "-"}`;
                 const showTries = state.mode === "buzz" || state.mode === "penalty";
@@ -387,8 +463,8 @@
                 if (triesMetric) {
                     triesMetric.classList.toggle("hidden", !showTries);
                 }
-                el("mode").textContent = stateText === "ready" || stateText === "not_ready" ? stateText : "not_ready";
                 renderBattery(state);
+                renderInputIndicators(state);
             } catch (err) {
                 appendLog(log, { error: String(err) });
             }
@@ -414,7 +490,7 @@
 
         refreshState();
         fetchStatusIcons();
-        setInterval(refreshState, 3000);
+        setInterval(refreshState, 1000);
         setInterval(fetchStatusIcons, 10000);
     }
 
@@ -579,6 +655,14 @@
         const deviceLog = el("deviceLog");
         const ssidList = el("ssidList");
 
+        function renderApIpNote(apIp) {
+            const apNode = el("apIpNote");
+            if (!apNode) {
+                return;
+            }
+            apNode.textContent = `AP IP Address: ${apIp || "192.168.4.1"}`;
+        }
+
         function fillConnection(cfg) {
             el("wifiSsid").value = cfg.wifiSsid || "";
             el("wifiPassword").value = cfg.wifiPassword || "";
@@ -600,6 +684,7 @@
             if (el("apEnabled")) {
                 el("apEnabled").checked = cfg.apEnabled !== false;
             }
+            renderApIpNote(cfg.apIpAddress);
         }
 
         function setText(id, value) {
@@ -611,13 +696,14 @@
 
         function renderDeviceDetails(details) {
             setText("detailPropName", details.propName || "-");
-            setText("detailIpAddress", details.ipAddress || "-");
+            setText("detailIpAddress", details.ipAddress || "unavailable");
             setText("detailSoftwareVersion", details.softwareVersion || "-");
             setText("detailBuildNumber", details.buildNumber || "-");
             setText("detailBuildDate", details.buildDate || "-");
             setText("detailCpuTemp", details.cpuTempC == null ? "n/a" : `${details.cpuTempC.toFixed(1)} C`);
             setText("detailFreeMemory", details.freeMemoryBytes == null ? "-" : `${Math.round(details.freeMemoryBytes / 1024)} KB`);
             setText("detailBattery", details.batteryPercent == null ? "-" : `${details.batteryPercent}%`);
+            renderApIpNote(details.apIpAddress);
 
             if (details.networkName && el("networkName") && document.activeElement !== el("networkName")) {
                 el("networkName").value = details.networkName;
@@ -629,8 +715,24 @@
             if (!statusEl) { return; }
             if (details && details.wifiConnected) {
                 const level = wifiLevel(details.wifiRssi);
-                statusEl.innerHTML = `<span class="wifi-icon">${tablerWifiSvg(level)}</span> Connected to <strong>${details.wifiSsid || "?"}</strong> (${details.wifiRssi} dBm)`;
+                let html = `<span class="wifi-icon">${tablerWifiSvg(level)}</span> Connected to <strong>${details.wifiSsid || "?"}</strong> (${details.wifiRssi} dBm)`;
+                if (details.pendingApShutdown && details.ipAddress && details.ipAddress !== "unavailable") {
+                    const netName = details.networkName || "";
+                    const mdnsUrl = netName ? `http://${netName}.local` : "";
+                    const ipUrl = `http://${details.ipAddress}`;
+                    html += `<div class="ap-shutdown-notice" style="margin-top:0.5rem;padding:0.6rem 0.8rem;background:var(--surface);border-left:3px solid var(--warn);border-radius:6px;font-size:0.9rem;">`;
+                    html += `<strong>AP shutting down soon.</strong> Switch your device to the same WiFi network, then open:<br>`;
+                    if (mdnsUrl) {
+                        html += `<a href="${mdnsUrl}" style="color:var(--accent);font-weight:600;">${mdnsUrl}</a> or `;
+                    }
+                    html += `<a href="${ipUrl}" style="color:var(--accent);font-weight:600;">${ipUrl}</a>`;
+                    html += `</div>`;
+                }
+                statusEl.innerHTML = html;
                 statusEl.style.color = "var(--ok)";
+            } else if (details && details.wifiConnecting && details.wifiTargetSsid) {
+                statusEl.innerHTML = `<span class="wifi-icon">${tablerWifiSvg(1)}</span> Connecting to <strong>${details.wifiTargetSsid}</strong>...`;
+                statusEl.style.color = "var(--warn)";
             } else {
                 statusEl.innerHTML = `Not connected to any network`;
                 statusEl.style.color = "var(--muted)";
@@ -694,18 +796,24 @@
 
         el("refreshDetails").addEventListener("click", loadDeviceDetails);
         el("connectWifi").addEventListener("click", async () => {
+            const statusEl = el("wifiStatus");
             try {
                 const payload = {
                     wifiSsid: el("wifiSsid").value,
                     wifiPassword: el("wifiPassword").value,
                     apEnabled: el("apEnabled") ? el("apEnabled").checked : true
                 };
+                if (statusEl) {
+                    statusEl.textContent = `Connecting to ${payload.wifiSsid || "selected network"}...`;
+                    statusEl.style.color = "var(--warn)";
+                }
                 const result = await api("/api/connection", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload)
                 });
                 appendLog(log, { connectWifi: { ssid: payload.wifiSsid, apEnabled: payload.apEnabled }, result: result });
+                await loadDeviceDetails();
             } catch (err) {
                 appendLog(log, { error: String(err) });
             }
@@ -775,7 +883,7 @@
         loadDeviceDetails();
         scanWifi();
         setInterval(scanWifi, 10000);
-        setInterval(loadDeviceDetails, 15000);
+        setInterval(loadDeviceDetails, 3000);
     }
 
     window.PX = {

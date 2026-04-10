@@ -15,6 +15,7 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "mdns.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "web_ui";
@@ -104,10 +105,24 @@ typedef struct {
 
 static char s_prop_id[32] = "px-wifi-v1";
 static bool s_mdns_started;
+static bool s_sta_connecting;
+static int s_sta_retry_count;
+static esp_timer_handle_t s_sta_reconnect_timer;
+static esp_timer_handle_t s_ap_shutdown_timer;
+static bool s_ap_shutdown_pending;
+static char s_sta_ip_text[32] = "";
+
+#define CONN_STORE_NS "web_ui"
+#define CONN_STORE_KEY "conn_cfg_v1"
+
+typedef struct {
+    uint32_t version;
+    connection_cfg_t cfg;
+} connection_store_t;
 
 static connection_cfg_t s_conn_cfg = {
-    .wifi_ssid = "",
-    .wifi_password = "",
+    .wifi_ssid = "TMOBILE-6338",
+    .wifi_password = "c6ggm7ghs5s",
     .mqtt_host = "",
     .mqtt_port = 1883,
     .mqtt_username = "",
@@ -123,6 +138,70 @@ static connection_cfg_t s_conn_cfg = {
     .ap_password = "",
     .ap_enabled = true,
 };
+
+static esp_err_t load_connection_cfg_nvs(void)
+{
+    nvs_handle_t nvs = 0;
+    size_t req_size = sizeof(connection_store_t);
+    connection_store_t stored;
+
+    esp_err_t err = nvs_open(CONN_STORE_NS, NVS_READONLY, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_get_blob(nvs, CONN_STORE_KEY, &stored, &req_size);
+    nvs_close(nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (req_size != sizeof(connection_store_t) || stored.version != 1) {
+        return ESP_ERR_INVALID_VERSION;
+    }
+
+    s_conn_cfg = stored.cfg;
+    s_conn_cfg.wifi_ssid[sizeof(s_conn_cfg.wifi_ssid) - 1] = '\0';
+    s_conn_cfg.wifi_password[sizeof(s_conn_cfg.wifi_password) - 1] = '\0';
+    s_conn_cfg.mqtt_host[sizeof(s_conn_cfg.mqtt_host) - 1] = '\0';
+    s_conn_cfg.mqtt_username[sizeof(s_conn_cfg.mqtt_username) - 1] = '\0';
+    s_conn_cfg.mqtt_password[sizeof(s_conn_cfg.mqtt_password) - 1] = '\0';
+    s_conn_cfg.mqtt_base_topic[sizeof(s_conn_cfg.mqtt_base_topic) - 1] = '\0';
+    s_conn_cfg.mqtt_commands_topic[sizeof(s_conn_cfg.mqtt_commands_topic) - 1] = '\0';
+    s_conn_cfg.mqtt_state_topic[sizeof(s_conn_cfg.mqtt_state_topic) - 1] = '\0';
+    s_conn_cfg.mqtt_events_topic[sizeof(s_conn_cfg.mqtt_events_topic) - 1] = '\0';
+    s_conn_cfg.mqtt_warnings_topic[sizeof(s_conn_cfg.mqtt_warnings_topic) - 1] = '\0';
+    s_conn_cfg.mqtt_game_state_topic[sizeof(s_conn_cfg.mqtt_game_state_topic) - 1] = '\0';
+    s_conn_cfg.mqtt_prop_state_topic[sizeof(s_conn_cfg.mqtt_prop_state_topic) - 1] = '\0';
+    s_conn_cfg.network_name[sizeof(s_conn_cfg.network_name) - 1] = '\0';
+    s_conn_cfg.ap_password[sizeof(s_conn_cfg.ap_password) - 1] = '\0';
+    if (s_conn_cfg.mqtt_port < 1 || s_conn_cfg.mqtt_port > 65535) {
+        s_conn_cfg.mqtt_port = 1883;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t save_connection_cfg_nvs(void)
+{
+    nvs_handle_t nvs = 0;
+    connection_store_t stored = {
+        .version = 1,
+        .cfg = s_conn_cfg,
+    };
+
+    esp_err_t err = nvs_open(CONN_STORE_NS, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_blob(nvs, CONN_STORE_KEY, &stored, sizeof(stored));
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+
+    nvs_close(nvs);
+    return err;
+}
 
 static void sanitize_network_name(const char *src, char *out, size_t out_size)
 {
@@ -405,6 +484,15 @@ static esp_err_t config_restore_post_handler(httpd_req_t *req)
 static esp_err_t connection_get_handler(httpd_req_t *req)
 {
     char payload[2048];
+    char ap_ip_text[32] = "192.168.4.1";
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+
+    if (ap_netif) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
+            snprintf(ap_ip_text, sizeof(ap_ip_text), IPSTR, IP2STR(&ip_info.ip));
+        }
+    }
 
     snprintf(payload,
              sizeof(payload),
@@ -424,6 +512,7 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
              "\"mqttPropStateTopic\":\"%s\","
              "\"networkName\":\"%s\","
              "\"apPassword\":\"%s\","
+             "\"apIpAddress\":\"%s\","
              "\"apEnabled\":%s"
              "}",
              s_conn_cfg.wifi_ssid,
@@ -441,6 +530,7 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
              s_conn_cfg.mqtt_prop_state_topic,
              s_conn_cfg.network_name,
              s_conn_cfg.ap_password,
+             ap_ip_text,
              s_conn_cfg.ap_enabled ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
@@ -515,12 +605,33 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
     ESP_LOGI(TAG, "Connection config updated (wifi ssid='%s', mqtt host='%s:%d', ap_enabled=%d)",
              s_conn_cfg.wifi_ssid, s_conn_cfg.mqtt_host, s_conn_cfg.mqtt_port, s_conn_cfg.ap_enabled);
 
+    {
+        esp_err_t save_err = save_connection_cfg_nvs();
+        if (save_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to persist connection config: %s", esp_err_to_name(save_err));
+        }
+    }
+
+    esp_err_t wifi_ret = ESP_OK;
+    bool connect_attempted = false;
     if (s_conn_cfg.wifi_ssid[0] != '\0') {
-        wifi_connect_sta(s_conn_cfg.wifi_ssid, s_conn_cfg.wifi_password);
+        connect_attempted = true;
+        wifi_ret = wifi_connect_sta(s_conn_cfg.wifi_ssid, s_conn_cfg.wifi_password);
     }
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true,\"applied\":true}");
+    if (connect_attempted && wifi_ret != ESP_OK) {
+        char err_payload[160];
+        snprintf(err_payload,
+                 sizeof(err_payload),
+                 "{\"ok\":false,\"applied\":true,\"connecting\":false,\"error\":\"%s\"}",
+                 esp_err_to_name(wifi_ret));
+        return httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+    }
+    return httpd_resp_sendstr(req,
+                              connect_attempted
+                                  ? "{\"ok\":true,\"applied\":true,\"connecting\":true}"
+                                  : "{\"ok\":true,\"applied\":true,\"connecting\":false}");
 }
 
 static esp_err_t device_details_get_handler(httpd_req_t *req)
@@ -530,16 +641,15 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     int battery = -1;
     int64_t free_heap = (int64_t)esp_get_free_heap_size();
     const esp_app_desc_t *app = esp_app_get_description();
-    char ip_text[32] = "192.168.4.1";
+    char ip_text[32] = "unavailable";
+    char ap_ip_text[32] = "192.168.4.1";
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
 
     if (ap_netif) {
         esp_netif_ip_info_t ip_info;
         if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
-            snprintf(ip_text,
-                     sizeof(ip_text),
-                     IPSTR,
-                     IP2STR(&ip_info.ip));
+            snprintf(ap_ip_text, sizeof(ap_ip_text), IPSTR, IP2STR(&ip_info.ip));
         }
     }
 
@@ -556,6 +666,12 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
         wifi_connected = true;
         wifi_rssi = (int)ap_info.rssi;
         snprintf(wifi_ssid_json, sizeof(wifi_ssid_json), "%s", (const char *)ap_info.ssid);
+        if (sta_netif) {
+            esp_netif_ip_info_t sta_ip;
+            if (esp_netif_get_ip_info(sta_netif, &sta_ip) == ESP_OK) {
+                snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&sta_ip.ip));
+            }
+        }
     }
 
     snprintf(payload,
@@ -571,9 +687,13 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
              "\"batteryPercent\":%d,"
              "\"networkName\":\"%s\","
              "\"status\":\"%s\","
+             "\"apIpAddress\":\"%s\","
              "\"wifiConnected\":%s,"
+             "\"wifiConnecting\":%s,"
+             "\"wifiTargetSsid\":\"%s\","
              "\"wifiSsid\":\"%s\","
-             "\"wifiRssi\":%d"
+             "\"wifiRssi\":%d,"
+             "\"pendingApShutdown\":%s"
              "}",
              s_prop_id,
              ip_text,
@@ -585,9 +705,13 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
              battery,
              s_conn_cfg.network_name,
              game_state,
+             ap_ip_text,
              wifi_connected ? "true" : "false",
+             s_sta_connecting ? "true" : "false",
+             s_conn_cfg.wifi_ssid,
              wifi_ssid_json,
-             wifi_rssi);
+             wifi_rssi,
+             s_ap_shutdown_pending ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
@@ -722,21 +846,71 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return httpd_ws_send_frame(req, &out);
 }
 
+static uint32_t get_backoff_ms(int retry_count)
+{
+    /* 1s, 2s, 4s, 8s, 16s, 32s cap */
+    int shift = retry_count > 5 ? 5 : retry_count;
+    return 1000u << shift;
+}
+
+static void sta_reconnect_timer_cb(void *arg)
+{
+    ESP_LOGI(TAG, "STA reconnect attempt (retry=%d)", s_sta_retry_count);
+    esp_err_t ret = esp_wifi_connect();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(ret));
+    }
+}
+
+static void ap_shutdown_timer_cb(void *arg)
+{
+    s_ap_shutdown_pending = false;
+    ESP_LOGI(TAG, "AP shutdown timer fired — switching to STA-only");
+    esp_wifi_set_mode(WIFI_MODE_STA);
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "STA disconnected — will retry in next connect call");
+        s_sta_ip_text[0] = '\0';
+
+        /* Cancel pending AP shutdown — we lost the STA link */
+        if (s_ap_shutdown_pending) {
+            esp_timer_stop(s_ap_shutdown_timer);
+            s_ap_shutdown_pending = false;
+        }
+
+        s_sta_connecting = (s_conn_cfg.wifi_ssid[0] != '\0');
+        s_sta_retry_count++;
+        ESP_LOGW(TAG, "STA disconnected (retry=%d)", s_sta_retry_count);
+
+        if (s_sta_connecting && s_sta_reconnect_timer) {
+            uint32_t delay_ms = get_backoff_ms(s_sta_retry_count - 1);
+            ESP_LOGI(TAG, "STA reconnect in %lu ms", (unsigned long)delay_ms);
+            esp_timer_start_once(s_sta_reconnect_timer, (uint64_t)delay_ms * 1000);
+        }
+
         if (!s_conn_cfg.ap_enabled) {
             ESP_LOGI(TAG, "Re-enabling AP after STA disconnect");
             esp_wifi_set_mode(WIFI_MODE_APSTA);
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "STA connected, IP=" IPSTR, IP2STR(&event->ip_info.ip));
+        s_sta_connecting = false;
+        s_sta_retry_count = 0;
+        snprintf(s_sta_ip_text, sizeof(s_sta_ip_text), IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "STA connected, IP=%s", s_sta_ip_text);
+
+        /* Cancel any pending reconnect timer */
+        if (s_sta_reconnect_timer) {
+            esp_timer_stop(s_sta_reconnect_timer);
+        }
+
         if (!s_conn_cfg.ap_enabled) {
-            ESP_LOGI(TAG, "Disabling AP (ap_enabled=false)");
-            esp_wifi_set_mode(WIFI_MODE_STA);
+            ESP_LOGI(TAG, "Scheduling AP shutdown in 10 seconds");
+            s_ap_shutdown_pending = true;
+            esp_timer_start_once(s_ap_shutdown_timer, 10000000);
         }
     }
 }
@@ -755,6 +929,15 @@ static esp_err_t wifi_connect_sta(const char *ssid, const char *password)
     }
 
     ESP_LOGI(TAG, "STA connecting to '%s'", ssid);
+    s_sta_connecting = true;
+    s_sta_retry_count = 0;
+    s_sta_ip_text[0] = '\0';
+
+    /* Cancel any pending backoff reconnect */
+    if (s_sta_reconnect_timer) {
+        esp_timer_stop(s_sta_reconnect_timer);
+    }
+
     esp_wifi_disconnect();
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
     return esp_wifi_connect();
@@ -811,19 +994,50 @@ esp_err_t web_ui_start(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    {
+        esp_err_t load_err = load_connection_cfg_nvs();
+        if (load_err == ESP_OK) {
+            ESP_LOGI(TAG, "Loaded connection settings from NVS");
+        } else {
+            ESP_LOGI(TAG, "No saved connection settings yet (%s)", esp_err_to_name(load_err));
+        }
+    }
+
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_ap();
     esp_netif_create_default_wifi_sta();
+
+    /* Create timers before registering event handlers */
+    {
+        esp_timer_create_args_t reconnect_args = {
+            .callback = sta_reconnect_timer_cb,
+            .name = "sta_reconnect",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&reconnect_args, &s_sta_reconnect_timer));
+
+        esp_timer_create_args_t ap_shutdown_args = {
+            .callback = ap_shutdown_timer_cb,
+            .name = "ap_shutdown",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&ap_shutdown_args, &s_ap_shutdown_timer));
+    }
 
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
 
     ESP_ERROR_CHECK(start_softap());
 
+    if (s_conn_cfg.wifi_ssid[0] != '\0') {
+        esp_err_t wifi_ret = wifi_connect_sta(s_conn_cfg.wifi_ssid, s_conn_cfg.wifi_password);
+        if (wifi_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Auto-connect to saved SSID failed: %s", esp_err_to_name(wifi_ret));
+        }
+    }
+
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 32;
+    config.max_uri_handlers = 40;
 
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &config));

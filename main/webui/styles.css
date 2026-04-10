@@ -189,6 +189,42 @@ h1, h2, h3 {
     text-transform: capitalize;
 }
 
+.badge.state-ready {
+    background: #2f8f74;
+    color: #fff;
+    border-color: rgba(0, 0, 0, 0.1);
+}
+
+.badge.state-not-ready {
+    background: #bf7f00;
+    color: #fff;
+    border-color: rgba(0, 0, 0, 0.1);
+}
+
+.badge.state-running {
+    background: #ffffff;
+    color: #19202d;
+    border-color: rgba(25, 32, 45, 0.2);
+}
+
+.badge.state-paused {
+    background: #d1a100;
+    color: #1a1a1a;
+    border-color: rgba(0, 0, 0, 0.1);
+}
+
+.badge.state-solved {
+    background: #1a6b55;
+    color: #fff;
+    border-color: rgba(0, 0, 0, 0.1);
+}
+
+.badge.state-failed {
+    background: #8e2323;
+    color: #fff;
+    border-color: rgba(0, 0, 0, 0.1);
+}
+
 .metrics {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -270,8 +306,70 @@ h1, h2, h3 {
     background: linear-gradient(160deg, #5dbd7e, #3da362);
 }
 
+.btn-pause {
+    background: linear-gradient(160deg, #d6b33e, #bd9700);
+    color: #1a1a1a;
+}
+
 .btn-solve {
     background: linear-gradient(160deg, #2f8f74, #1a6b55);
+}
+
+.input-indicators {
+    display: flex;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.6rem 0 0;
+}
+
+.input-dot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: 50%;
+    font-size: 0.75rem;
+    font-weight: 800;
+    color: #fff;
+    line-height: 1;
+}
+
+.input-dot.connected {
+    background: var(--ok);
+}
+
+.input-dot.disconnected {
+    background: var(--bad);
+}
+
+.input-dot.inactive {
+    background: #b0b0b0;
+}
+
+#gameStatePanel.state-ready {
+    background: linear-gradient(180deg, rgba(47, 143, 116, 0.24), rgba(255, 255, 255, 0.78));
+}
+
+#gameStatePanel.state-not-ready {
+    background: linear-gradient(180deg, rgba(191, 127, 0, 0.26), rgba(255, 255, 255, 0.78));
+}
+
+#gameStatePanel.state-running {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.78));
+}
+
+#gameStatePanel.state-paused {
+    background: linear-gradient(180deg, rgba(214, 179, 62, 0.28), rgba(255, 255, 255, 0.78));
+}
+
+#gameStatePanel.state-solved {
+    background: linear-gradient(180deg, rgba(26, 107, 85, 0.38), rgba(255, 255, 255, 0.78));
+}
+
+#gameStatePanel.state-failed {
+    background: linear-gradient(180deg, rgba(142, 35, 35, 0.38), rgba(255, 255, 255, 0.78));
 }
 
 .wifi-status {

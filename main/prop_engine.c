@@ -10,11 +10,24 @@
 #include "esp_sleep.h"
 #include "esp_spiffs.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "prop_engine";
+
+/* GPIO mapping from docs/pin-mapping.md for DevKitC-1 v1.0 */
+static const gpio_num_t s_wire_input_gpios[8] = {
+    GPIO_NUM_4,   /* INPUT_1 red */
+    GPIO_NUM_5,   /* INPUT_2 green */
+    GPIO_NUM_6,   /* INPUT_3 yellow */
+    GPIO_NUM_7,   /* INPUT_4 blue */
+    GPIO_NUM_15,  /* INPUT_5 aux_1 */
+    GPIO_NUM_16,  /* INPUT_6 aux_2 */
+    GPIO_NUM_17,  /* INPUT_7 aux_3 */
+    GPIO_NUM_18,  /* INPUT_8 lid_switch */
+};
 
 #define BATTERY_MAX_POINTS 20
 #define BATTERY_FILE_PATH "/spiffs/battery_profile.json"
@@ -114,6 +127,90 @@ typedef struct {
 static prop_ctx_t s_ctx;
 
 static void prop_engine_get_state_json_unlocked(char *out, size_t out_size);
+static void handle_disconnect_unlocked(int idx);
+static void handle_connect_unlocked(int idx);
+
+static esp_err_t init_wire_inputs(void)
+{
+    /* Reset pins from any default IOMUX functions first */
+    for (int i = 0; i < 8; ++i) {
+        gpio_reset_pin(s_wire_input_gpios[i]);
+    }
+
+    gpio_config_t io_cfg = {
+        .pin_bit_mask = 0,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    for (int i = 0; i < 8; ++i) {
+        io_cfg.pin_bit_mask |= (1ULL << s_wire_input_gpios[i]);
+    }
+
+    return gpio_config(&io_cfg);
+}
+
+static void wire_input_task(void *arg)
+{
+    int stable_count[8] = {0};
+    bool last_sample_connected[8] = {0};
+    bool debounced_connected[8] = {0};
+
+    for (int i = 0; i < 8; ++i) {
+        int level = gpio_get_level(s_wire_input_gpios[i]);
+        bool connected = (level == 0);
+        last_sample_connected[i] = connected;
+        debounced_connected[i] = connected;
+        stable_count[i] = 1;
+    }
+
+    while (true) {
+        int check_interval_ms;
+        int required_consecutive;
+
+        xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+        check_interval_ms = s_ctx.cfg.debounce_check_interval_ms;
+        required_consecutive = s_ctx.cfg.debounce_consecutive_reads;
+        xSemaphoreGive(s_ctx.lock);
+
+        if (check_interval_ms < 1) {
+            check_interval_ms = 10;
+        }
+        if (required_consecutive < 1) {
+            required_consecutive = 1;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(check_interval_ms));
+
+        for (int i = 0; i < 8; ++i) {
+            int level = gpio_get_level(s_wire_input_gpios[i]);
+            bool connected = (level == 0); /* active-low input */
+
+            if (connected == last_sample_connected[i]) {
+                if (stable_count[i] < required_consecutive) {
+                    stable_count[i]++;
+                }
+            } else {
+                last_sample_connected[i] = connected;
+                stable_count[i] = 1;
+            }
+
+            if (stable_count[i] >= required_consecutive && connected != debounced_connected[i]) {
+                debounced_connected[i] = connected;
+
+                xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+                if (connected) {
+                    handle_connect_unlocked(i + 1);
+                } else {
+                    handle_disconnect_unlocked(i + 1);
+                }
+                xSemaphoreGive(s_ctx.lock);
+            }
+        }
+    }
+}
 
 static int64_t now_ms(void)
 {
@@ -1104,7 +1201,7 @@ static void handle_disconnect_unlocked(int idx)
 
     s_ctx.connected_mask &= (uint8_t)(~(1u << (idx - 1)));
 
-    if (s_ctx.state != PROP_STATE_COUNTDOWN) {
+    if (s_ctx.state != PROP_STATE_COUNTDOWN && s_ctx.state != PROP_STATE_PAUSED) {
         set_ready_state();
         return;
     }
@@ -1239,15 +1336,35 @@ esp_err_t prop_engine_init(void)
     set_default_battery_config();
 
     (void)init_spiffs();
+    ESP_ERROR_CHECK(init_wire_inputs());
+
+    /* Small delay to let pins settle after config */
+    vTaskDelay(pdMS_TO_TICKS(50));
+
     xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
     load_config_file_if_present();
     load_battery_file_if_present();
 
-    s_ctx.connected_mask = (uint8_t)((1u << s_ctx.cfg.wire_count) - 1u);
+    s_ctx.connected_mask = 0;
+    for (int i = 0; i < 8; ++i) {
+        int level = gpio_get_level(s_wire_input_gpios[i]);
+        ESP_LOGI(TAG, "GPIO %d (input %d) level=%d", s_wire_input_gpios[i], i + 1, level);
+        if (level == 0) {
+            s_ctx.connected_mask |= (uint8_t)(1u << i);
+        }
+    }
+    /* Also dump raw GPIO IN registers for diagnosis */
+    {
+        volatile uint32_t *gpio_in = (volatile uint32_t *)0x6000403C;  /* GPIO_IN_REG */
+        volatile uint32_t *gpio_in1 = (volatile uint32_t *)0x60004040; /* GPIO_IN1_REG */
+        ESP_LOGI(TAG, "GPIO_IN_REG=0x%08lX  GPIO_IN1_REG=0x%08lX", (unsigned long)*gpio_in, (unsigned long)*gpio_in1);
+    }
+    ESP_LOGI(TAG, "Initial connected_mask=0x%02X (wire_count=%d)", (unsigned)s_ctx.connected_mask, s_ctx.cfg.wire_count);
     s_ctx.time_remaining_ms = s_ctx.cfg.default_time_s * 1000;
     set_ready_state();
     xSemaphoreGive(s_ctx.lock);
 
+    xTaskCreate(wire_input_task, "wire_inputs", 4096, NULL, 6, NULL);
     xTaskCreate(timer_task, "prop_timer", 4096, NULL, 5, NULL);
     ESP_LOGI(TAG, "Prop engine initialized");
     return ESP_OK;
@@ -1280,6 +1397,7 @@ static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
              "\"solution\":\"%s\","
              "\"disconnectedOrder\":\"%s\","
              "\"wireCount\":%d,"
+             "\"connectedMask\":%u,"
              "\"battery\":%d,"
              "\"batteryAdcRaw\":%d,"
              "\"batteryAdcAt0V\":%d,"
@@ -1302,6 +1420,7 @@ static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
              s_ctx.cfg.solution,
              s_ctx.disconnected_order,
              s_ctx.cfg.wire_count,
+             (unsigned)s_ctx.connected_mask,
              s_ctx.battery_percent,
              s_ctx.battery_adc_raw,
              s_ctx.battery_adc_at_0v,
@@ -1465,7 +1584,23 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
 
         if (!all_wires_connected()) {
             set_ready_state();
-            snprintf(response, response_size, "{\"ok\":false,\"error\":\"notReady\"}");
+            /* Build list of disconnected input names */
+            char disc_list[160] = "";
+            int pos = 0;
+            uint8_t required = (uint8_t)((1u << s_ctx.cfg.wire_count) - 1u);
+            uint8_t missing = required & ~s_ctx.connected_mask;
+            for (int b = 0; b < s_ctx.cfg.wire_count; b++) {
+                if (missing & (1u << b)) {
+                    if (pos > 0) { disc_list[pos++] = ','; disc_list[pos++] = ' '; }
+                    const char *name = s_ctx.cfg.input_names[b];
+                    while (*name && pos < (int)sizeof(disc_list) - 1) { disc_list[pos++] = *name++; }
+                }
+            }
+            disc_list[pos] = '\0';
+            snprintf(response, response_size,
+                     "{\"ok\":false,\"error\":\"notReady\",\"event\":\"startIgnored\","
+                     "\"message\":\"Start ignored: inputs not closed: %s\","
+                     "\"disconnected\":\"%s\"}", disc_list, disc_list);
             return ESP_OK;
         }
 

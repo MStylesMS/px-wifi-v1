@@ -25,7 +25,7 @@
     </header>
 
     <main class="wrap layout">
-        <section class="panel pulse">
+        <section class="panel pulse" id="gameStatePanel">
             <div class="panel-head">
                 <h2>Game State</h2>
                 <span id="stateBadge" class="badge">loading</span>
@@ -35,20 +35,20 @@
                     <p>Time Remaining</p>
                     <h3 id="timeRemaining">--:--</h3>
                 </div>
+                <div class="metric">
+                    <p>Input States</p>
+                    <h3 id="inputStatesSummary">-</h3>
+                    <div id="inputIndicators" class="input-indicators"></div>
+                </div>
                 <div id="triesMetric" class="metric">
                     <p>Tries Used</p>
                     <h3 id="triesUsed">-</h3>
-                </div>
-                <div class="metric">
-                    <p>Ready Status</p>
-                    <h3 id="mode">-</h3>
                 </div>
                 <div class="metric">
                     <p>Battery</p>
                     <h3 id="batteryValue">--</h3>
                 </div>
             </div>
-
         </section>
 
         <section class="panel">
@@ -59,12 +59,10 @@
             <div class="btn-grid">
                 <button class="btn btn-start" data-cmd='{"command":"start"}'>Start</button>
                 <button class="btn btn-warn" data-cmd='{"command":"reset"}'>Reset</button>
-                <button class="btn" data-cmd='{"command":"pause"}'>Pause</button>
+                <button class="btn btn-pause" data-cmd='{"command":"pause"}'>Pause</button>
                 <button class="btn btn-resume" data-cmd='{"command":"resume"}'>Resume</button>
                 <button class="btn btn-solve" data-cmd='{"command":"solve"}'>Solve</button>
                 <button class="btn btn-danger" data-cmd='{"command":"fail"}'>Fail</button>
-                <button class="btn btn-ghost" data-cmd='{"command":"disconnect","input":1}'>Disconnect 1</button>
-                <button class="btn btn-ghost" data-cmd='{"command":"connect","input":1}'>Connect 1</button>
             </div>
             <pre id="actionLog" class="log"></pre>
         </section>
