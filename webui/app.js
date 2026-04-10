@@ -10,7 +10,18 @@
         return new Date().toISOString();
     }
 
+    function getCurrentOriginBase() {
+        if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+            return window.location.origin;
+        }
+        return "";
+    }
+
     function getApiBase() {
+        const originBase = getCurrentOriginBase();
+        if (originBase) {
+            return originBase;
+        }
         return localStorage.getItem(KEY_BASE) || "http://192.168.4.1";
     }
 
@@ -31,8 +42,10 @@
             return mockResponse(path, options);
         }
 
+        const originBase = getCurrentOriginBase();
         const base = getApiBase().replace(/\/$/, "");
-        const res = await fetch(base + path, options);
+        const requestUrl = originBase ? path : (base + path);
+        const res = await fetch(requestUrl, options);
         if (!res.ok) {
             throw new Error(`HTTP ${res.status} ${res.statusText}`);
         }
@@ -144,7 +157,9 @@
                 mqttWarningsTopic: "paradox/site/zone/warnings",
                 mqttGameStateTopic: "paradox/game/state",
                 mqttPropStateTopic: "paradox/state",
-                networkName: "px-wifi-v1-a1b2"
+                networkName: "px-wifi-v1-a1b2",
+                apPassword: "",
+                apEnabled: true
             };
         }
 
@@ -216,8 +231,8 @@
             return badge;
         }
 
-        const topbar = document.querySelector(".topbar");
-        if (!topbar) {
+        const container = el("statusIcons");
+        if (!container) {
             return null;
         }
 
@@ -225,8 +240,73 @@
         badge.id = "batteryBadge";
         badge.className = "battery-badge battery-good";
         badge.innerHTML = `<span id="batteryBadgeIcon" class="battery-icon"></span><span id="batteryBadgeText">--%</span>`;
-        topbar.appendChild(badge);
+        container.appendChild(badge);
         return badge;
+    }
+
+    function ensureWifiBadge() {
+        let badge = el("wifiBadge");
+        if (badge) {
+            return badge;
+        }
+
+        const container = el("statusIcons");
+        if (!container) {
+            return null;
+        }
+
+        badge = document.createElement("div");
+        badge.id = "wifiBadge";
+        badge.className = "wifi-badge";
+        badge.innerHTML = `<span id="wifiBadgeIcon" class="wifi-icon"></span><span id="wifiBadgeText">--</span>`;
+        container.insertBefore(badge, container.firstChild);
+        return badge;
+    }
+
+    function renderWifiStatus(details) {
+        const badge = ensureWifiBadge();
+        if (badge) {
+            const icon = el("wifiBadgeIcon");
+            const text = el("wifiBadgeText");
+            if (details && details.wifiConnected) {
+                const level = wifiLevel(details.wifiRssi);
+                if (icon) { icon.innerHTML = tablerWifiSvg(level); }
+                if (text) { text.textContent = details.wifiSsid || "Connected"; }
+            } else {
+                if (icon) { icon.innerHTML = tablerWifiSvg(0); }
+                if (text) { text.textContent = "No WiFi"; }
+            }
+        }
+    }
+
+    var s_lastDeviceDetails = null;
+
+    async function fetchStatusIcons() {
+        try {
+            const details = await api("/api/device/details");
+            s_lastDeviceDetails = details;
+            renderWifiStatus(details);
+            if (details.batteryPercent != null) {
+                renderBattery({ battery: details.batteryPercent, batteryProfile: "unknown", batteryVoltageMv: 0, lowBattery: false });
+            }
+        } catch (e) { /* silent */ }
+    }
+
+    function wifiLevel(rssi) {
+        const v = Number(rssi);
+        if (!Number.isFinite(v)) {
+            return 0;
+        }
+        if (v >= -55) {
+            return 4;
+        }
+        if (v >= -67) {
+            return 3;
+        }
+        if (v >= -75) {
+            return 2;
+        }
+        return 1;
     }
 
     function renderBattery(state) {
@@ -309,7 +389,6 @@
                 }
                 el("mode").textContent = stateText === "ready" || stateText === "not_ready" ? stateText : "not_ready";
                 renderBattery(state);
-                el("buildLine").textContent = `Build: ${state.version || "-"} (${state.buildId || "-"})`;
             } catch (err) {
                 appendLog(log, { error: String(err) });
             }
@@ -334,7 +413,9 @@
         });
 
         refreshState();
+        fetchStatusIcons();
         setInterval(refreshState, 3000);
+        setInterval(fetchStatusIcons, 10000);
     }
 
     function pageConfig() {
@@ -489,6 +570,8 @@
         el("restoreDefaults").addEventListener("click", () => restoreDefaults(false));
 
         load();
+        fetchStatusIcons();
+        setInterval(fetchStatusIcons, 10000);
     }
 
     function pageConnection() {
@@ -511,6 +594,12 @@
             el("mqttGameStateTopic").value = cfg.mqttGameStateTopic || "";
             el("mqttPropStateTopic").value = cfg.mqttPropStateTopic || "";
             el("networkName").value = cfg.networkName || "";
+            if (el("apPassword")) {
+                el("apPassword").value = cfg.apPassword || "";
+            }
+            if (el("apEnabled")) {
+                el("apEnabled").checked = cfg.apEnabled !== false;
+            }
         }
 
         function setText(id, value) {
@@ -530,26 +619,22 @@
             setText("detailFreeMemory", details.freeMemoryBytes == null ? "-" : `${Math.round(details.freeMemoryBytes / 1024)} KB`);
             setText("detailBattery", details.batteryPercent == null ? "-" : `${details.batteryPercent}%`);
 
-            if (details.networkName && el("networkName")) {
+            if (details.networkName && el("networkName") && document.activeElement !== el("networkName")) {
                 el("networkName").value = details.networkName;
             }
         }
 
-        function wifiLevel(rssi) {
-            const v = Number(rssi);
-            if (!Number.isFinite(v)) {
-                return 1;
+        function renderWifiConnectionStatus(details) {
+            const statusEl = el("wifiStatus");
+            if (!statusEl) { return; }
+            if (details && details.wifiConnected) {
+                const level = wifiLevel(details.wifiRssi);
+                statusEl.innerHTML = `<span class="wifi-icon">${tablerWifiSvg(level)}</span> Connected to <strong>${details.wifiSsid || "?"}</strong> (${details.wifiRssi} dBm)`;
+                statusEl.style.color = "var(--ok)";
+            } else {
+                statusEl.innerHTML = `Not connected to any network`;
+                statusEl.style.color = "var(--muted)";
             }
-            if (v >= -55) {
-                return 4;
-            }
-            if (v >= -67) {
-                return 3;
-            }
-            if (v >= -75) {
-                return 2;
-            }
-            return 1;
         }
 
         function renderSsidList(networks) {
@@ -587,7 +672,11 @@
             try {
                 const details = await api("/api/device/details");
                 renderDeviceDetails(details);
-                appendLog(deviceLog, { loaded: true, details: details });
+                renderWifiConnectionStatus(details);
+                renderWifiStatus(details);
+                if (details.batteryPercent != null) {
+                    renderBattery({ battery: details.batteryPercent, batteryProfile: "unknown", batteryVoltageMv: 0, lowBattery: false });
+                }
             } catch (err) {
                 appendLog(deviceLog, { error: String(err) });
             }
@@ -603,20 +692,37 @@
             }
         }
 
-        el("loadConnection").addEventListener("click", loadConnection);
         el("refreshDetails").addEventListener("click", loadDeviceDetails);
-        el("scanWifi").addEventListener("click", scanWifi);
-        el("applyDeviceName").addEventListener("click", async () => {
+        el("connectWifi").addEventListener("click", async () => {
             try {
                 const payload = {
-                    networkName: el("networkName").value
+                    wifiSsid: el("wifiSsid").value,
+                    wifiPassword: el("wifiPassword").value,
+                    apEnabled: el("apEnabled") ? el("apEnabled").checked : true
                 };
-                const result = await api("/api/device/name", {
+                const result = await api("/api/connection", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload)
                 });
-                appendLog(deviceLog, { applyDeviceName: payload, result: result });
+                appendLog(log, { connectWifi: { ssid: payload.wifiSsid, apEnabled: payload.apEnabled }, result: result });
+            } catch (err) {
+                appendLog(log, { error: String(err) });
+            }
+        });
+        el("applyDeviceName").addEventListener("click", async () => {
+            try {
+                const payload = {
+                    networkName: el("networkName").value,
+                    apPassword: el("apPassword") ? el("apPassword").value : "",
+                    apEnabled: el("apEnabled") ? el("apEnabled").checked : true
+                };
+                const result = await api("/api/connection", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+                appendLog(deviceLog, { applyAP: payload, result: result });
                 await loadConnection();
                 await loadDeviceDetails();
             } catch (err) {
@@ -627,13 +733,26 @@
         el("saveConnection").addEventListener("click", async () => {
             try {
                 const payload = {
-                    wifiSsid: el("wifiSsid").value,
-                    wifiPassword: el("wifiPassword").value,
                     mqttHost: el("mqttHost").value,
                     mqttPort: Number(el("mqttPort").value),
                     mqttUsername: el("mqttUsername").value,
                     mqttPassword: el("mqttPassword").value,
-                    mqttBaseTopic: el("mqttBaseTopic").value,
+                    mqttBaseTopic: el("mqttBaseTopic").value
+                };
+                const result = await api("/api/connection", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+                appendLog(log, { applyMqtt: payload, result: result });
+            } catch (err) {
+                appendLog(log, { error: String(err) });
+            }
+        });
+
+        el("applyTopics").addEventListener("click", async () => {
+            try {
+                const payload = {
                     mqttCommandTopic: el("mqttCommandTopic").value,
                     mqttStateTopic: el("mqttStateTopic").value,
                     mqttEventsTopic: el("mqttEventsTopic").value,
@@ -646,7 +765,7 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload)
                 });
-                appendLog(log, { apply: payload, result: result });
+                appendLog(log, { applyTopics: payload, result: result });
             } catch (err) {
                 appendLog(log, { error: String(err) });
             }

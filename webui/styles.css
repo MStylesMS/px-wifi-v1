@@ -59,14 +59,21 @@ h1, h2, h3 {
 }
 
 .battery-badge {
-    margin-left: auto;
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
+    font-weight: 700;
+    font-size: 0.85rem;
+}
+
+.status-icons {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
     border-radius: 999px;
     border: 1px solid var(--line);
-    padding: 0.35rem 0.75rem;
-    font-weight: 700;
+    padding: 0.3rem 0.7rem;
     background: rgba(255, 255, 255, 0.82);
 }
 
@@ -152,6 +159,7 @@ h1, h2, h3 {
     border-radius: 18px;
     box-shadow: var(--shadow);
     padding: 1rem;
+    overflow: hidden;
     animation: rise 420ms ease both;
 }
 
@@ -252,6 +260,78 @@ h1, h2, h3 {
 
 .btn-danger {
     background: linear-gradient(160deg, #d15151, #ab3030);
+}
+
+.btn-start {
+    background: linear-gradient(160deg, #5dbd7e, #3da362);
+}
+
+.btn-resume {
+    background: linear-gradient(160deg, #5dbd7e, #3da362);
+}
+
+.btn-solve {
+    background: linear-gradient(160deg, #2f8f74, #1a6b55);
+}
+
+.wifi-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.7rem;
+    font-weight: 600;
+}
+
+.wifi-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.network-name-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.7rem;
+}
+
+.network-name-label {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.92rem;
+}
+
+.toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.92rem;
+}
+
+.toggle-row input[type="checkbox"] {
+    width: 1.1rem;
+    height: 1.1rem;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.ap-bottom-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+}
+
+.row-actions-right {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-left: auto;
 }
 
 .inline-form {
@@ -398,6 +478,8 @@ textarea {
     background: #111722;
     color: #d5deee;
     padding: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
     font-size: 0.85rem;
     line-height: 1.35;
 }

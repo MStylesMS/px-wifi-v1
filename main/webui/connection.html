@@ -19,7 +19,8 @@
         <nav class="tabs">
             <a class="tab" href="index.html">Live</a>
             <a class="tab" href="config.html">Config</a>
-            <a class="tab active" href="connection.html">Connection</a>
+            <a class="tab active" href="connection.html">Connect</a>
+            <div class="status-icons" id="statusIcons"></div>
         </nav>
     </header>
 
@@ -28,9 +29,10 @@
             <div class="panel-head">
                 <h2>WiFi Connection</h2>
                 <div class="row-actions">
-                    <button id="scanWifi" class="btn btn-ghost">Scan SSIDs</button>
+                    <button id="connectWifi" class="btn">Connect</button>
                 </div>
             </div>
+            <div id="wifiStatus" class="wifi-status hint">Not connected</div>
             <div class="form-grid">
                 <label>SSID<input id="wifiSsid" type="text" maxlength="32"></label>
                 <label>Password<input id="wifiPassword" type="password" maxlength="64"></label>
@@ -40,6 +42,25 @@
                 <h3>Available SSIDs</h3>
                 <div id="ssidList" class="ssid-list"></div>
             </div>
+            <div class="network-name-row" style="margin-top:0.8rem;">
+                <label class="network-name-label">Network Name
+                    <div class="input-suffix-wrap">
+                        <input id="networkName" type="text" maxlength="32" placeholder="px-wifi-v1-1a2b">
+                        <span class="input-suffix">.local</span>
+                    </div>
+                </label>
+            </div>
+            <label style="margin-top:0.5rem; display:flex; flex-direction:column; gap:0.35rem; font-size:0.92rem;">AP Password
+                <input id="apPassword" type="password" maxlength="64" placeholder="Leave blank for open">
+            </label>
+            <div class="ap-bottom-row" style="margin-top:0.8rem;">
+                <label class="toggle-row">
+                    <input id="apEnabled" type="checkbox" checked>
+                    <span>Keep AP active while connected to WiFi</span>
+                </label>
+                <button id="applyDeviceName" class="btn">Apply</button>
+            </div>
+            <p class="hint" style="margin-top:0.25rem;">When off, the AP shuts down after STA connects. It re-enables automatically if WiFi disconnects.</p>
         </section>
 
         <section class="panel wide">
@@ -59,17 +80,6 @@
                 <div class="detail-item"><span>Free Memory</span><strong id="detailFreeMemory">-</strong></div>
                 <div class="detail-item"><span>Battery</span><strong id="detailBattery">-</strong></div>
             </div>
-            <div class="form-grid" style="margin-top:0.8rem;">
-                <label>Network Name
-                    <div class="input-suffix-wrap">
-                        <input id="networkName" type="text" maxlength="32" placeholder="px-wifi-v1-1a2b">
-                        <span class="input-suffix">.local</span>
-                    </div>
-                </label>
-                <div class="device-apply-wrap">
-                    <button id="applyDeviceName" class="btn">Apply</button>
-                </div>
-            </div>
             <pre id="deviceLog" class="log"></pre>
         </section>
 
@@ -77,7 +87,6 @@
             <div class="panel-head">
                 <h2>MQTT Connection</h2>
                 <div class="row-actions">
-                    <button id="loadConnection" class="btn btn-ghost">Load</button>
                     <button id="saveConnection" class="btn">Apply</button>
                 </div>
             </div>
@@ -94,6 +103,9 @@
         <section class="panel wide">
             <div class="panel-head">
                 <h2>MQTT Topic Settings</h2>
+                <div class="row-actions">
+                    <button id="applyTopics" class="btn">Apply</button>
+                </div>
             </div>
             <div class="form-grid">
                 <label>Commands Topic<input id="mqttCommandTopic" type="text" maxlength="127"></label>

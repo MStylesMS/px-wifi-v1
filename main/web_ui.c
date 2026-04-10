@@ -19,6 +19,8 @@
 
 static const char *TAG = "web_ui";
 
+static esp_err_t wifi_connect_sta(const char *ssid, const char *password);
+
 typedef struct {
     const uint8_t *start;
     const uint8_t *end;
@@ -64,14 +66,14 @@ static const static_asset_t ASSET_STYLES = {
     .start = styles_css_start,
     .end = styles_css_end,
     .content_type = "text/css; charset=utf-8",
-    .cache_control = "public, max-age=600",
+    .cache_control = "no-store",
 };
 
 static const static_asset_t ASSET_APP_JS = {
     .start = app_js_start,
     .end = app_js_end,
     .content_type = "application/javascript; charset=utf-8",
-    .cache_control = "public, max-age=600",
+    .cache_control = "no-store",
 };
 
 static const static_asset_t ASSET_LOGO = {
@@ -96,6 +98,8 @@ typedef struct {
     char mqtt_game_state_topic[128];
     char mqtt_prop_state_topic[128];
     char network_name[33];
+    char ap_password[65];
+    bool ap_enabled;
 } connection_cfg_t;
 
 static char s_prop_id[32] = "px-wifi-v1";
@@ -116,6 +120,8 @@ static connection_cfg_t s_conn_cfg = {
     .mqtt_game_state_topic = "paradox/game/state",
     .mqtt_prop_state_topic = "paradox/state",
     .network_name = "",
+    .ap_password = "",
+    .ap_enabled = true,
 };
 
 static void sanitize_network_name(const char *src, char *out, size_t out_size)
@@ -270,6 +276,36 @@ static bool json_extract_int_local(const char *json, const char *key, int *out)
     return true;
 }
 
+static bool json_extract_bool_local(const char *json, const char *key, bool *out)
+{
+    char key_pat[48];
+    const char *p;
+
+    snprintf(key_pat, sizeof(key_pat), "\"%s\"", key);
+    p = strstr(json, key_pat);
+    if (!p) {
+        return false;
+    }
+
+    p = strchr(p, ':');
+    if (!p) {
+        return false;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+        p++;
+    }
+    if (strncmp(p, "true", 4) == 0) {
+        *out = true;
+        return true;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
 static void copy_bounded_local(char *dst, size_t dst_size, const char *src)
 {
     if (dst_size == 0) {
@@ -291,6 +327,10 @@ static esp_err_t static_asset_handler(httpd_req_t *req)
     }
 
     len = (size_t)(asset->end - asset->start);
+    /* EMBED_TXTFILES appends a \0; strip it so browsers don't see it */
+    if (len > 0 && asset->start[len - 1] == '\0') {
+        len--;
+    }
     httpd_resp_set_type(req, asset->content_type);
     httpd_resp_set_hdr(req, "Cache-Control", asset->cache_control);
     return httpd_resp_send(req, (const char *)asset->start, (int)len);
@@ -382,7 +422,9 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
              "\"mqttWarningsTopic\":\"%s\","
              "\"mqttGameStateTopic\":\"%s\","
              "\"mqttPropStateTopic\":\"%s\","
-             "\"networkName\":\"%s\""
+             "\"networkName\":\"%s\","
+             "\"apPassword\":\"%s\","
+             "\"apEnabled\":%s"
              "}",
              s_conn_cfg.wifi_ssid,
              s_conn_cfg.wifi_password,
@@ -397,7 +439,9 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
              s_conn_cfg.mqtt_warnings_topic,
              s_conn_cfg.mqtt_game_state_topic,
              s_conn_cfg.mqtt_prop_state_topic,
-             s_conn_cfg.network_name);
+             s_conn_cfg.network_name,
+             s_conn_cfg.ap_password,
+             s_conn_cfg.ap_enabled ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
@@ -458,9 +502,22 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
         sanitize_network_name(value, s_conn_cfg.network_name, sizeof(s_conn_cfg.network_name));
         (void)apply_mdns_hostname();
     }
+    if (json_extract_string_local(body, "apPassword", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.ap_password, sizeof(s_conn_cfg.ap_password), value);
+    }
+    {
+        bool ap_val;
+        if (json_extract_bool_local(body, "apEnabled", &ap_val)) {
+            s_conn_cfg.ap_enabled = ap_val;
+        }
+    }
 
-    ESP_LOGI(TAG, "Connection config updated (wifi ssid='%s', mqtt host='%s:%d')",
-             s_conn_cfg.wifi_ssid, s_conn_cfg.mqtt_host, s_conn_cfg.mqtt_port);
+    ESP_LOGI(TAG, "Connection config updated (wifi ssid='%s', mqtt host='%s:%d', ap_enabled=%d)",
+             s_conn_cfg.wifi_ssid, s_conn_cfg.mqtt_host, s_conn_cfg.mqtt_port, s_conn_cfg.ap_enabled);
+
+    if (s_conn_cfg.wifi_ssid[0] != '\0') {
+        wifi_connect_sta(s_conn_cfg.wifi_ssid, s_conn_cfg.wifi_password);
+    }
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true,\"applied\":true}");
@@ -491,6 +548,16 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     (void)json_extract_string_local(state_json, "gameState", game_state, sizeof(game_state));
 
     char payload[1024];
+    char wifi_ssid_json[64] = "";
+    int wifi_rssi = 0;
+    bool wifi_connected = false;
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        wifi_connected = true;
+        wifi_rssi = (int)ap_info.rssi;
+        snprintf(wifi_ssid_json, sizeof(wifi_ssid_json), "%s", (const char *)ap_info.ssid);
+    }
+
     snprintf(payload,
              sizeof(payload),
              "{"
@@ -503,7 +570,10 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
              "\"freeMemoryBytes\":%lld,"
              "\"batteryPercent\":%d,"
              "\"networkName\":\"%s\","
-             "\"status\":\"%s\""
+             "\"status\":\"%s\","
+             "\"wifiConnected\":%s,"
+             "\"wifiSsid\":\"%s\","
+             "\"wifiRssi\":%d"
              "}",
              s_prop_id,
              ip_text,
@@ -514,7 +584,10 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
              (long long)free_heap,
              battery,
              s_conn_cfg.network_name,
-             game_state);
+             game_state,
+             wifi_connected ? "true" : "false",
+             wifi_ssid_json,
+             wifi_rssi);
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
@@ -649,6 +722,44 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return httpd_ws_send_frame(req, &out);
 }
 
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGW(TAG, "STA disconnected — will retry in next connect call");
+        if (!s_conn_cfg.ap_enabled) {
+            ESP_LOGI(TAG, "Re-enabling AP after STA disconnect");
+            esp_wifi_set_mode(WIFI_MODE_APSTA);
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "STA connected, IP=" IPSTR, IP2STR(&event->ip_info.ip));
+        if (!s_conn_cfg.ap_enabled) {
+            ESP_LOGI(TAG, "Disabling AP (ap_enabled=false)");
+            esp_wifi_set_mode(WIFI_MODE_STA);
+        }
+    }
+}
+
+static esp_err_t wifi_connect_sta(const char *ssid, const char *password)
+{
+    if (!ssid || ssid[0] == '\0') {
+        ESP_LOGW(TAG, "wifi_connect_sta: empty SSID, skipping");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    wifi_config_t sta_cfg = {0};
+    strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
+    if (password && password[0] != '\0') {
+        strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
+    }
+
+    ESP_LOGI(TAG, "STA connecting to '%s'", ssid);
+    esp_wifi_disconnect();
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    return esp_wifi_connect();
+}
+
 static esp_err_t start_softap(void)
 {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -674,6 +785,11 @@ static esp_err_t start_softap(void)
 
     snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "Paradox-PXWiFiV1-%02X%02X", mac[4], mac[5]);
 
+    if (s_conn_cfg.ap_password[0] != '\0') {
+        strncpy((char *)ap_cfg.ap.password, s_conn_cfg.ap_password, sizeof(ap_cfg.ap.password) - 1);
+        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -698,6 +814,10 @@ esp_err_t web_ui_start(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_ap();
+    esp_netif_create_default_wifi_sta();
+
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
 
     ESP_ERROR_CHECK(start_softap());
 
