@@ -5,9 +5,13 @@
 #include "prop_engine.h"
 #include <ctype.h>
 #include <math.h>
+#include <string.h>
 #include "esp_app_desc.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "driver/ledc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,6 +21,25 @@ static const char *TAG = "px-wifi-v1";
 #define PIEZO_GPIO      47
 #define BUZZER_DUTY_50  512
 #define BUZZER_MAX_NOTES 96
+
+#define DISP_I2C_PORT I2C_NUM_0
+#define DISP_I2C_SDA 1
+#define DISP_I2C_SCL 2
+#define DISP_I2C_FREQ_HZ 100000
+#define DISP_HT16K33_ADDR_DEFAULT 0x70
+
+#define SEG_A 0x01
+#define SEG_B 0x02
+#define SEG_C 0x04
+#define SEG_D 0x08
+#define SEG_E 0x10
+#define SEG_F 0x20
+#define SEG_G 0x40
+
+static bool s_display_ready;
+static i2c_master_bus_handle_t s_i2c_bus;
+static i2c_master_dev_handle_t s_display_dev;
+static uint8_t s_display_addr = DISP_HT16K33_ADDR_DEFAULT;
 
 static uint8_t lerp_u8(uint8_t a, uint8_t b, int num, int den)
 {
@@ -102,6 +125,284 @@ static void led_task(void *arg)
         (void)drv_rgb_led_set(0, c);
         vTaskDelay(pdMS_TO_TICKS(80));
     }
+}
+
+static bool display_i2c_write_cmd(uint8_t cmd)
+{
+    esp_err_t err = i2c_master_transmit(s_display_dev, &cmd, 1, 100);
+    return err == ESP_OK;
+}
+
+static bool display_i2c_write_frame(const uint16_t frame[8])
+{
+    uint8_t buf[17];
+    int i;
+
+    buf[0] = 0x00;
+    for (i = 0; i < 8; ++i) {
+        buf[1 + i * 2] = (uint8_t)(frame[i] & 0xFF);
+        buf[1 + i * 2 + 1] = (uint8_t)((frame[i] >> 8) & 0xFF);
+    }
+
+    esp_err_t err = i2c_master_transmit(s_display_dev, buf, sizeof(buf), 100);
+    return err == ESP_OK;
+}
+
+static uint16_t seg_for_digit(int d)
+{
+    switch (d) {
+        case 0: return SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F;
+        case 1: return SEG_B | SEG_C;
+        case 2: return SEG_A | SEG_B | SEG_D | SEG_E | SEG_G;
+        case 3: return SEG_A | SEG_B | SEG_C | SEG_D | SEG_G;
+        case 4: return SEG_B | SEG_C | SEG_F | SEG_G;
+        case 5: return SEG_A | SEG_C | SEG_D | SEG_F | SEG_G;
+        case 6: return SEG_A | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G;
+        case 7: return SEG_A | SEG_B | SEG_C;
+        case 8: return SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G;
+        case 9: return SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G;
+        default: return 0;
+    }
+}
+
+static void display_set_digit(uint16_t frame[8], int pos, uint16_t segments)
+{
+    static const int idx_map[4] = {0, 1, 3, 4};
+    if (pos < 0 || pos > 3) {
+        return;
+    }
+    frame[idx_map[pos]] = segments;
+}
+
+static void display_render_blank(uint16_t frame[8])
+{
+    memset(frame, 0, sizeof(uint16_t) * 8);
+}
+
+static void display_render_dashes(uint16_t frame[8])
+{
+    int i;
+    display_render_blank(frame);
+    for (i = 0; i < 4; ++i) {
+        display_set_digit(frame, i, SEG_G);
+    }
+}
+
+static void display_render_mmss(uint16_t frame[8], int total_seconds, bool colon_on)
+{
+    int mm;
+    int ss;
+
+    if (total_seconds < 0) {
+        total_seconds = 0;
+    }
+    if (total_seconds > 99 * 60 + 59) {
+        total_seconds = 99 * 60 + 59;
+    }
+
+    mm = total_seconds / 60;
+    ss = total_seconds % 60;
+
+    display_render_blank(frame);
+    display_set_digit(frame, 0, seg_for_digit((mm / 10) % 10));
+    display_set_digit(frame, 1, seg_for_digit(mm % 10));
+    display_set_digit(frame, 2, seg_for_digit((ss / 10) % 10));
+    display_set_digit(frame, 3, seg_for_digit(ss % 10));
+    if (colon_on) {
+        frame[2] |= 0x02;
+    }
+}
+
+static void display_apply_progress_bars(uint16_t frame[8], uint8_t connected_mask, int wire_count)
+{
+    int i;
+    for (i = 0; i < 8; ++i) {
+        bool used = i < wire_count;
+        bool connected = (connected_mask & (1u << i)) != 0;
+
+        if (!used || !connected) {
+            continue;
+        }
+
+        if (i < 4) {
+            static const int idx_map[4] = {0, 1, 3, 4};
+            frame[idx_map[i]] |= SEG_A;
+        } else {
+            static const int idx_map[4] = {0, 1, 3, 4};
+            frame[idx_map[i - 4]] |= SEG_D;
+        }
+    }
+}
+
+static bool lid_forces_blank(const char *lid_mode)
+{
+    int level;
+
+    if (!lid_mode || strcmp(lid_mode, "off") == 0) {
+        return false;
+    }
+
+    level = gpio_get_level(GPIO_NUM_18);
+    if (strcmp(lid_mode, "closed") == 0) {
+        return level == 0;
+    }
+    if (strcmp(lid_mode, "open") == 0) {
+        return level == 1;
+    }
+
+    return false;
+}
+
+static void display_task(void *arg)
+{
+    (void)arg;
+
+    /* --- Boot test: show 8888 for 3 seconds so user can confirm I2C works --- */
+    {
+        uint16_t test_frame[8] = {0};
+        uint16_t all8 = SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G;
+        test_frame[0] = all8;
+        test_frame[1] = all8;
+        test_frame[2] = 0x02; /* colon */
+        test_frame[3] = all8;
+        test_frame[4] = all8;
+        for (int t = 0; t < 30; ++t) {
+            bool ok = display_i2c_write_frame(test_frame);
+            if (t == 0) {
+                ESP_LOGI(TAG, "Display boot test write: %s", ok ? "OK" : "FAILED");
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    /* --- End boot test --- */
+
+    uint16_t last_frame[8] = {0xFFFF};
+    prop_runtime_snapshot_t snap;
+    prop_state_t prev_state = PROP_STATE_NOT_READY;
+    int frozen_result_seconds = 0;
+    int64_t result_enter_ms = 0;
+
+    while (true) {
+        uint16_t frame[8];
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        bool colon_on = ((now_ms / 1000) % 2) == 0;
+
+        prop_engine_get_runtime_snapshot(&snap);
+
+        if (snap.state != prev_state &&
+            (snap.state == PROP_STATE_DEFUSED || snap.state == PROP_STATE_DETONATED)) {
+            frozen_result_seconds = snap.time_remaining_ms / 1000;
+            if (frozen_result_seconds < 0) {
+                frozen_result_seconds = 0;
+            }
+            result_enter_ms = now_ms;
+        }
+        prev_state = snap.state;
+
+        if (lid_forces_blank(snap.lid_mode)) {
+            display_render_blank(frame);
+        } else if (snap.state == PROP_STATE_READY) {
+            display_render_blank(frame);
+        } else if (snap.state == PROP_STATE_NOT_READY) {
+            display_render_dashes(frame);
+            display_apply_progress_bars(frame, snap.connected_mask, snap.wire_count);
+        } else if (snap.state == PROP_STATE_COUNTDOWN || snap.state == PROP_STATE_PAUSED) {
+            display_render_mmss(frame, snap.time_remaining_ms / 1000, colon_on);
+        } else if (snap.state == PROP_STATE_DEFUSED || snap.state == PROP_STATE_DETONATED) {
+            if ((now_ms - result_enter_ms) <= 120000) {
+                display_render_mmss(frame, frozen_result_seconds, colon_on);
+            } else {
+                display_render_blank(frame);
+            }
+        } else {
+            display_render_blank(frame);
+        }
+
+        if (memcmp(frame, last_frame, sizeof(frame)) != 0) {
+            if (!display_i2c_write_frame(frame)) {
+                ESP_LOGW(TAG, "HT16K33 frame update failed");
+            } else {
+                memcpy(last_frame, frame, sizeof(frame));
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+static void init_display(void)
+{
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = DISP_I2C_PORT,
+        .sda_io_num = DISP_I2C_SDA,
+        .scl_io_num = DISP_I2C_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = DISP_HT16K33_ADDR_DEFAULT,
+        .scl_speed_hz = DISP_I2C_FREQ_HZ,
+    };
+    int addr;
+    bool found = false;
+
+    esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_i2c_bus);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "I2C bus init failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    for (addr = 0x70; addr <= 0x77; ++addr) {
+        err = i2c_master_probe(s_i2c_bus, addr, 50);
+        if (err == ESP_OK) {
+            s_display_addr = (uint8_t)addr;
+            found = true;
+            ESP_LOGI(TAG, "I2C device found at 0x%02X", addr);
+            break;
+        }
+    }
+
+    if (!found) {
+        ESP_LOGW(TAG, "No I2C device found at 0x70-0x77 (check SDA/SCL/power)");
+        return;
+    }
+
+    dev_cfg.device_address = s_display_addr;
+    err = i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_display_dev);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "I2C add display device 0x%02X failed: %s", s_display_addr, esp_err_to_name(err));
+        return;
+    }
+
+    if (!display_i2c_write_cmd(0x21)) {
+        ESP_LOGW(TAG, "HT16K33 oscillator enable failed");
+        return;
+    }
+    if (!display_i2c_write_cmd(0x81)) {
+        ESP_LOGW(TAG, "HT16K33 display-on command failed");
+        return;
+    }
+    if (!display_i2c_write_cmd(0xEF)) {
+        ESP_LOGW(TAG, "HT16K33 brightness command failed");
+        return;
+    }
+
+    {
+        uint16_t test_frame[8] = {0};
+        uint16_t all8 = SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G;
+        test_frame[0] = all8;
+        test_frame[1] = all8;
+        test_frame[2] = 0x02; /* colon on */
+        test_frame[3] = all8;
+        test_frame[4] = all8;
+        bool write_ok = display_i2c_write_frame(test_frame);
+        ESP_LOGI(TAG, "HT16K33 test pattern write: %s", write_ok ? "OK" : "FAILED");
+    }
+
+    s_display_ready = true;
+    ESP_LOGI(TAG, "HT16K33 display initialized on I2C addr 0x%02X", s_display_addr);
 }
 
 /* ---------- buzzer MML sequencer ---------- */
@@ -475,6 +776,11 @@ void app_main(void)
 
     ESP_ERROR_CHECK(prop_engine_init());
     xTaskCreate(led_task, "led_status", 3072, NULL, 5, NULL);
+
+    init_display();
+    if (s_display_ready) {
+        xTaskCreate(display_task, "display_status", 4096, NULL, 5, NULL);
+    }
 
     init_buzzer();
     xTaskCreate(buzzer_task, "buzzer_status", 3072, NULL, 5, NULL);

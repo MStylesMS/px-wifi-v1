@@ -172,6 +172,14 @@ Players encounter a prop (themed as a bomb, security panel, junction box, etc.) 
 - **Passive piezo buzzer** on PWM output
 - **Status RGB LED** onboard
 
+Lid mode is configurable as:
+
+- `off` — ignore lid input for display gating
+- `closed` — lid considered closed when GPIO level is LOW
+- `open` — lid considered closed when GPIO level is HIGH
+
+When lid is considered closed, the external 7-segment display is blanked.
+
 ### 6.3 Game States
 
 ```
@@ -220,6 +228,17 @@ Players encounter a prop (themed as a bomb, security panel, junction box, etc.) 
 | Default initial time | 3600 seconds (60:00) unless changed by saved configuration |
 | Hold-after-end | On `DEFUSED` or `DETONATED`, hold displayed final time up to 5 minutes, then auto-reset |
 | No tenths display | 4-digit display remains `MM:SS` only; no tenths shown |
+
+Display-specific behavior for HT16K33 4-digit module:
+
+- During `COUNTDOWN` and `PAUSED`, show `MM:SS` with colon blinking at 1 Hz.
+- In `DEFUSED` or `DETONATED`, freeze the final displayed time and continue 1 Hz colon blink for 120 seconds (or until reset), then blank.
+- In `READY`, blank all segments.
+- In `NOT_READY`, show `----` as base state.
+- In `NOT_READY`, overlay wire progress bars:
+  - wires 1-4 map to top bars (`A` segments) of digits 1-4
+  - wires 5-8 map to bottom bars (`D` segments) of digits 1-4
+  - ignored wires (indexes above `wireCount`) remain as `-` (treated like closed/unused)
 
 ### 6.5 Wire Sequence Validation
 

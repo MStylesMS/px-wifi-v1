@@ -142,9 +142,10 @@ Reference: https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/es
 | Interface | I2C |
 | Driver IC | HT16K33 |
 | Digit format | `MM:SS` with colon |
+| Behavior | Countdown: `MM:SS` + 1 Hz colon blink; ready/lid-closed: blank; not-ready: `----` with progress bars; result: frozen time + 1 Hz blink for 120 s |
 | Color | TBD (red, green, or blue — depends on theming) |
 | Voltage | 5V (from I2C port) |
-| Part number | Adafruit PID 1002 (white display option) or color-equivalent HT16K33 variant |
+| Part number | Adafruit PID 878 (0.56" 4-digit 7-segment + HT16K33 backpack) |
 
 ### 4.2 Piezo Buzzer
 
@@ -181,6 +182,12 @@ Reference: https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/es
 | Type | Microswitch or magnetic reed switch |
 | Wiring | NO (normally open) — closes when lid is closed, opens when lid is lifted |
 | GPIO | `INPUT_8` (shared with wiring harness) |
+
+Firmware lid gating modes for display blanking:
+
+- `off`: ignore lid input
+- `closed`: blank when lid GPIO is LOW
+- `open`: blank when lid GPIO is HIGH
 
 ---
 

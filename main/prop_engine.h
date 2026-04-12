@@ -60,6 +60,14 @@ typedef struct {
 } prop_config_t;
 
 typedef struct {
+    prop_state_t state;
+    int time_remaining_ms;
+    uint8_t connected_mask;
+    int wire_count;
+    char lid_mode[20];
+} prop_runtime_snapshot_t;
+
+typedef struct {
     char start_resume[PROP_BUZZER_MML_MAX_LEN];
     char pause_reset[PROP_BUZZER_MML_MAX_LEN];
     char solved[PROP_BUZZER_MML_MAX_LEN];
@@ -78,3 +86,4 @@ esp_err_t prop_engine_restore_defaults(bool persist, char *response, size_t resp
 
 prop_led_hint_t prop_engine_get_led_hint(void);
 void prop_engine_get_buzzer_mml_config(prop_buzzer_mml_config_t *out);
+void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out);

@@ -83,7 +83,7 @@
                 maxTries: 3,
                 wireCount: 4,
                 mode: "penalty",
-                lidMode: "ignore",
+                lidMode: "off",
                 solution: "1234",
                 keepSyncEnabled: false,
                 heartbeatInterval: 10000,

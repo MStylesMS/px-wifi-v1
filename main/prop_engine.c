@@ -552,7 +552,7 @@ static void set_default_config(prop_config_t *cfg)
     cfg->lid_enabled = false;
     cfg->lid_normally_closed = false;
     snprintf(cfg->mode, sizeof(cfg->mode), "penalty");
-    snprintf(cfg->lid_mode, sizeof(cfg->lid_mode), "ignore");
+    snprintf(cfg->lid_mode, sizeof(cfg->lid_mode), "off");
     snprintf(cfg->solution, sizeof(cfg->solution), "1234");
 
     snprintf(cfg->input_names[0], sizeof(cfg->input_names[0]), "red");
@@ -661,10 +661,16 @@ static prop_led_hint_t led_hint_unlocked(void)
 
 static void set_ready_state(void)
 {
+    prop_state_t prev = s_ctx.state;
+
     if (all_wires_connected()) {
         s_ctx.state = PROP_STATE_READY;
     } else {
         s_ctx.state = PROP_STATE_NOT_READY;
+    }
+
+    if (prev != s_ctx.state) {
+        ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev), state_name(s_ctx.state));
     }
 }
 
@@ -970,9 +976,22 @@ static void apply_config_json_unlocked(const char *json)
     }
 
     if (json_extract_string(json, "lidMode", s_val, sizeof(s_val))) {
-        if (strcmp(s_val, "ignore") == 0 || strcmp(s_val, "normallyOpen") == 0 || strcmp(s_val, "normallyClosed") == 0) {
-            copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), s_val);
+        if (strcmp(s_val, "ignore") == 0) {
+            copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "off");
+        } else if (strcmp(s_val, "normallyClosed") == 0) {
+            copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "closed");
+        } else if (strcmp(s_val, "normallyOpen") == 0) {
+            copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "open");
+        } else if (strcmp(s_val, "off") == 0) {
+            copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "off");
+        } else if (strcmp(s_val, "closed") == 0) {
+            copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "closed");
+        } else if (strcmp(s_val, "open") == 0) {
+            copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "open");
         }
+
+        s_ctx.cfg.lid_enabled = strcmp(s_ctx.cfg.lid_mode, "off") != 0;
+        s_ctx.cfg.lid_normally_closed = strcmp(s_ctx.cfg.lid_mode, "closed") == 0;
     }
 
     if (json_extract_string(json, "solution", s_val, sizeof(s_val))) {
@@ -1244,8 +1263,13 @@ static void load_battery_file_if_present(void)
 
 static void enter_result_state(prop_state_t target)
 {
+    prop_state_t prev = s_ctx.state;
+
     s_ctx.state = target;
     s_ctx.state_enter_ms = now_ms();
+    if (prev != target) {
+        ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev), state_name(target));
+    }
 }
 
 static void apply_wrong_wire_logic(void)
@@ -1415,7 +1439,6 @@ static esp_err_t init_spiffs(void)
 
     esp_err_t err = esp_vfs_spiffs_register(&conf);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SPIFFS unavailable: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -1687,9 +1710,30 @@ void prop_engine_get_buzzer_mml_config(prop_buzzer_mml_config_t *out)
     xSemaphoreGive(s_ctx.lock);
 }
 
+void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out)
+{
+    if (!out) {
+        return;
+    }
+
+    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    out->state = s_ctx.state;
+    out->time_remaining_ms = s_ctx.time_remaining_ms;
+    out->connected_mask = s_ctx.connected_mask;
+    out->wire_count = s_ctx.cfg.wire_count;
+    copy_bounded(out->lid_mode, sizeof(out->lid_mode), s_ctx.cfg.lid_mode);
+    xSemaphoreGive(s_ctx.lock);
+}
+
 static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char *response, size_t response_size)
 {
     int i_val;
+    prop_state_t prev_state;
+
+    ESP_LOGI(TAG, "Command received: %s (state=%s, t=%d)",
+             cmd,
+             state_name(s_ctx.state),
+             s_ctx.time_remaining_ms / 1000);
 
     if (command_is_deduped(cmd) && strcmp(cmd, "getState") != 0) {
         snprintf(response, response_size, "{\"ok\":true,\"deduped\":true}");
@@ -1707,6 +1751,8 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
     }
 
     if (strcmp(cmd, "start") == 0 || strcmp(cmd, "resume") == 0) {
+        prev_state = s_ctx.state;
+
         if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
             s_ctx.time_remaining_ms = i_val * 1000;
         }
@@ -1738,13 +1784,18 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
         }
 
         s_ctx.state = PROP_STATE_COUNTDOWN;
+        if (prev_state != s_ctx.state) {
+            ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev_state), state_name(s_ctx.state));
+        }
         snprintf(response, response_size, "{\"ok\":true,\"state\":\"countdown\"}");
         return ESP_OK;
     }
 
     if (strcmp(cmd, "pause") == 0 || strcmp(cmd, "stop") == 0) {
         if (s_ctx.state == PROP_STATE_COUNTDOWN) {
+            prev_state = s_ctx.state;
             s_ctx.state = PROP_STATE_PAUSED;
+            ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev_state), state_name(s_ctx.state));
             snprintf(response, response_size, "{\"ok\":true,\"state\":\"paused\"}");
         } else {
             snprintf(response, response_size, "{\"ok\":false,\"error\":\"notRunning\"}");
@@ -1753,6 +1804,7 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
     }
 
     if (strcmp(cmd, "reset") == 0) {
+        ESP_LOGI(TAG, "Reset requested");
         reset_round();
         snprintf(response, response_size, "{\"ok\":true,\"state\":\"%s\"}", state_name(s_ctx.state));
         return ESP_OK;
@@ -1761,6 +1813,7 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
     if (strcmp(cmd, "setTime") == 0) {
         if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
             s_ctx.time_remaining_ms = i_val * 1000;
+            ESP_LOGI(TAG, "Time set: %d sec", i_val);
             snprintf(response, response_size, "{\"ok\":true,\"time\":%d}", i_val);
         } else {
             snprintf(response, response_size, "{\"ok\":false,\"error\":\"missingTime\"}");
@@ -1833,9 +1886,21 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
     if (strcmp(cmd, "setLidMode") == 0) {
         char lid_mode[20];
         if (json_extract_string(json, "mode", lid_mode, sizeof(lid_mode))) {
-            snprintf(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "%s", lid_mode);
-            s_ctx.cfg.lid_enabled = strcmp(lid_mode, "ignore") != 0;
-            s_ctx.cfg.lid_normally_closed = strcmp(lid_mode, "normallyClosed") == 0;
+            if (strcmp(lid_mode, "ignore") == 0) {
+                copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "off");
+            } else if (strcmp(lid_mode, "normallyClosed") == 0) {
+                copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "closed");
+            } else if (strcmp(lid_mode, "normallyOpen") == 0) {
+                copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), "open");
+            } else if (strcmp(lid_mode, "off") == 0 || strcmp(lid_mode, "closed") == 0 || strcmp(lid_mode, "open") == 0) {
+                copy_bounded(s_ctx.cfg.lid_mode, sizeof(s_ctx.cfg.lid_mode), lid_mode);
+            } else {
+                snprintf(response, response_size, "{\"ok\":false,\"error\":\"invalidLidMode\"}");
+                return ESP_OK;
+            }
+
+            s_ctx.cfg.lid_enabled = strcmp(s_ctx.cfg.lid_mode, "off") != 0;
+            s_ctx.cfg.lid_normally_closed = strcmp(s_ctx.cfg.lid_mode, "closed") == 0;
             snprintf(response, response_size, "{\"ok\":true,\"lidMode\":\"%s\"}", s_ctx.cfg.lid_mode);
         } else {
             snprintf(response, response_size, "{\"ok\":false,\"error\":\"missingMode\"}");
