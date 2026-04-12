@@ -11,6 +11,8 @@
 #include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
+#include "soc/gpio_reg.h"
+#include "soc/io_mux_reg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -132,24 +134,74 @@ static void handle_connect_unlocked(int idx);
 
 static esp_err_t init_wire_inputs(void)
 {
+    esp_err_t err;
+
     /* Reset pins from any default IOMUX functions first */
     for (int i = 0; i < 8; ++i) {
-        gpio_reset_pin(s_wire_input_gpios[i]);
+        err = gpio_reset_pin(s_wire_input_gpios[i]);
+        ESP_LOGI(TAG, "gpio_reset_pin(%d) = %s", s_wire_input_gpios[i], esp_err_to_name(err));
     }
 
-    gpio_config_t io_cfg = {
-        .pin_bit_mask = 0,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-
+    /* Configure each pin individually so we can log per-pin results */
     for (int i = 0; i < 8; ++i) {
-        io_cfg.pin_bit_mask |= (1ULL << s_wire_input_gpios[i]);
+        gpio_config_t io_cfg = {
+            .pin_bit_mask = (1ULL << s_wire_input_gpios[i]),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        err = gpio_config(&io_cfg);
+        int level = gpio_get_level(s_wire_input_gpios[i]);
+        ESP_LOGI(TAG, "gpio_config GPIO %d: %s, level=%d", s_wire_input_gpios[i], esp_err_to_name(err), level);
     }
 
-    return gpio_config(&io_cfg);
+    /* Test: flip to pull-down to prove config takes effect */
+    for (int i = 0; i < 4; ++i) {
+        gpio_set_pull_mode(s_wire_input_gpios[i], GPIO_PULLDOWN_ONLY);
+        vTaskDelay(pdMS_TO_TICKS(5));
+        int level_pd = gpio_get_level(s_wire_input_gpios[i]);
+        /* Restore pull-up */
+        gpio_set_pull_mode(s_wire_input_gpios[i], GPIO_PULLUP_ONLY);
+        vTaskDelay(pdMS_TO_TICKS(5));
+        int level_pu = gpio_get_level(s_wire_input_gpios[i]);
+        ESP_LOGI(TAG, "GPIO %d: pull-down→%d, pull-up→%d", s_wire_input_gpios[i], level_pd, level_pu);
+    }
+
+    /* Test: drive GPIO 4-7 as outputs LOW, read back, then restore to input */
+    ESP_LOGW(TAG, "=== OUTPUT DRIVE TEST (driving LOW) ===");
+    for (int i = 0; i < 4; ++i) {
+        gpio_num_t pin = s_wire_input_gpios[i];
+        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(pin, 0);
+        vTaskDelay(pdMS_TO_TICKS(5));
+        /* Read raw register to see if output took effect */
+        uint32_t gpio_in = REG_READ(GPIO_IN_REG);
+        int bit = (gpio_in >> pin) & 1;
+        ESP_LOGW(TAG, "GPIO %d: output LOW → raw bit=%d", pin, bit);
+        /* Now drive HIGH */
+        gpio_set_level(pin, 1);
+        vTaskDelay(pdMS_TO_TICKS(5));
+        gpio_in = REG_READ(GPIO_IN_REG);
+        bit = (gpio_in >> pin) & 1;
+        ESP_LOGW(TAG, "GPIO %d: output HIGH → raw bit=%d", pin, bit);
+        /* Restore to input with pull-up */
+        gpio_set_direction(pin, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY);
+    }
+
+    /* Read IO_MUX register for GPIO 5,6,7 to check routing */
+    ESP_LOGW(TAG, "=== IO_MUX REGISTER DUMP ===");
+    for (int i = 0; i < 4; ++i) {
+        gpio_num_t pin = s_wire_input_gpios[i];
+        /* IO_MUX registers are at IO_MUX_GPIO0_REG + pin*4 */
+        uint32_t iomux_reg = REG_READ(IO_MUX_GPIO0_REG + pin * 4);
+        uint32_t gpio_func = REG_READ(GPIO_FUNC0_OUT_SEL_CFG_REG + pin * 4);
+        ESP_LOGW(TAG, "GPIO %d: IO_MUX=0x%08lx, GPIO_FUNCx_OUT_SEL=0x%08lx",
+                 pin, (unsigned long)iomux_reg, (unsigned long)gpio_func);
+    }
+
+    return ESP_OK;
 }
 
 static void wire_input_task(void *arg)
@@ -199,6 +251,11 @@ static void wire_input_task(void *arg)
 
             if (stable_count[i] >= required_consecutive && connected != debounced_connected[i]) {
                 debounced_connected[i] = connected;
+
+                ESP_LOGW(TAG, "GPIO %d (input %d): %s → %s",
+                         s_wire_input_gpios[i], i + 1,
+                         connected ? "HIGH" : "LOW",
+                         connected ? "LOW (connected)" : "HIGH (disconnected)");
 
                 xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
                 if (connected) {
@@ -506,6 +563,19 @@ static void set_default_config(prop_config_t *cfg)
     snprintf(cfg->input_names[5], sizeof(cfg->input_names[5]), "orange");
     snprintf(cfg->input_names[6], sizeof(cfg->input_names[6]), "brown");
     snprintf(cfg->input_names[7], sizeof(cfg->input_names[7]), "purple");
+
+    snprintf(cfg->buzzer_start_resume_mml,
+             sizeof(cfg->buzzer_start_resume_mml),
+             "T168 O5 L16 V70 A R D");
+    snprintf(cfg->buzzer_pause_reset_mml,
+             sizeof(cfg->buzzer_pause_reset_mml),
+             "T156 O5 L16 V65 D R G4");
+    snprintf(cfg->buzzer_solved_mml,
+             sizeof(cfg->buzzer_solved_mml),
+             "T184 O5 L16 V78 C E G R C6 R C6 E6 G6 L8 C7");
+    snprintf(cfg->buzzer_failed_mml,
+             sizeof(cfg->buzzer_failed_mml),
+             "T108 O5 L16 V72 G F E R B4 R L8 G4");
 }
 
 static bool all_wires_connected(void)
@@ -747,7 +817,11 @@ static esp_err_t save_config_file(void)
             "  \"input5Name\": \"%s\",\n"
             "  \"input6Name\": \"%s\",\n"
             "  \"input7Name\": \"%s\",\n"
-            "  \"input8Name\": \"%s\"\n"
+            "  \"input8Name\": \"%s\",\n"
+            "  \"buzzerStartResumeMml\": \"%s\",\n"
+            "  \"buzzerPauseResetMml\": \"%s\",\n"
+            "  \"buzzerSolvedMml\": \"%s\",\n"
+            "  \"buzzerFailedMml\": \"%s\"\n"
             "}\n",
             s_ctx.cfg.default_time_s,
             s_ctx.cfg.penalty_s,
@@ -775,7 +849,11 @@ static esp_err_t save_config_file(void)
             s_ctx.cfg.input_names[4],
             s_ctx.cfg.input_names[5],
             s_ctx.cfg.input_names[6],
-            s_ctx.cfg.input_names[7]);
+            s_ctx.cfg.input_names[7],
+            s_ctx.cfg.buzzer_start_resume_mml,
+            s_ctx.cfg.buzzer_pause_reset_mml,
+            s_ctx.cfg.buzzer_solved_mml,
+            s_ctx.cfg.buzzer_failed_mml);
 
     fclose(f);
     return ESP_OK;
@@ -837,7 +915,7 @@ static void apply_config_json_unlocked(const char *json)
     if (json_extract_int(json, "maxTries", &i_val) && i_val >= 1 && i_val <= 100) {
         s_ctx.cfg.max_tries = i_val;
     }
-    if (json_extract_int(json, "wireCount", &i_val) && i_val >= 1 && i_val <= 8) {
+    if (json_extract_int(json, "wireCount", &i_val) && i_val >= 0 && i_val <= 8) {
         s_ctx.cfg.wire_count = i_val;
     }
     if (json_extract_int(json, "debounceCheckIntervalMs", &i_val) && i_val >= 1 && i_val <= 200) {
@@ -939,6 +1017,27 @@ static void apply_config_json_unlocked(const char *json)
     }
     if (json_extract_string(json, "input8Name", s_val, sizeof(s_val))) {
         copy_bounded(s_ctx.cfg.input_names[7], sizeof(s_ctx.cfg.input_names[7]), s_val);
+    }
+
+    if (json_extract_string(json, "buzzerStartResumeMml", s_val, sizeof(s_val))) {
+        copy_bounded(s_ctx.cfg.buzzer_start_resume_mml,
+                     sizeof(s_ctx.cfg.buzzer_start_resume_mml),
+                     s_val);
+    }
+    if (json_extract_string(json, "buzzerPauseResetMml", s_val, sizeof(s_val))) {
+        copy_bounded(s_ctx.cfg.buzzer_pause_reset_mml,
+                     sizeof(s_ctx.cfg.buzzer_pause_reset_mml),
+                     s_val);
+    }
+    if (json_extract_string(json, "buzzerSolvedMml", s_val, sizeof(s_val))) {
+        copy_bounded(s_ctx.cfg.buzzer_solved_mml,
+                     sizeof(s_ctx.cfg.buzzer_solved_mml),
+                     s_val);
+    }
+    if (json_extract_string(json, "buzzerFailedMml", s_val, sizeof(s_val))) {
+        copy_bounded(s_ctx.cfg.buzzer_failed_mml,
+                     sizeof(s_ctx.cfg.buzzer_failed_mml),
+                     s_val);
     }
 
     if (json_extract_string(json, "batteryProfile", s_val, sizeof(s_val))) {
@@ -1468,7 +1567,11 @@ void prop_engine_get_config_json(char *out, size_t out_size)
              "\"input5Name\":\"%s\","
              "\"input6Name\":\"%s\","
              "\"input7Name\":\"%s\","
-             "\"input8Name\":\"%s\""
+             "\"input8Name\":\"%s\","
+             "\"buzzerStartResumeMml\":\"%s\","
+             "\"buzzerPauseResetMml\":\"%s\","
+             "\"buzzerSolvedMml\":\"%s\","
+             "\"buzzerFailedMml\":\"%s\""
              "}",
              cfg->default_time_s,
              cfg->penalty_s,
@@ -1493,7 +1596,11 @@ void prop_engine_get_config_json(char *out, size_t out_size)
              cfg->input_names[4],
              cfg->input_names[5],
              cfg->input_names[6],
-             cfg->input_names[7]);
+             cfg->input_names[7],
+             cfg->buzzer_start_resume_mml,
+             cfg->buzzer_pause_reset_mml,
+             cfg->buzzer_solved_mml,
+             cfg->buzzer_failed_mml);
 
     xSemaphoreGive(s_ctx.lock);
 }
@@ -1530,7 +1637,11 @@ void prop_engine_get_default_config_json(char *out, size_t out_size)
              "\"input5Name\":\"%s\","
              "\"input6Name\":\"%s\","
              "\"input7Name\":\"%s\","
-             "\"input8Name\":\"%s\""
+             "\"input8Name\":\"%s\","
+             "\"buzzerStartResumeMml\":\"%s\","
+             "\"buzzerPauseResetMml\":\"%s\","
+             "\"buzzerSolvedMml\":\"%s\","
+             "\"buzzerFailedMml\":\"%s\""
              "}",
              defaults.default_time_s,
              defaults.penalty_s,
@@ -1555,7 +1666,25 @@ void prop_engine_get_default_config_json(char *out, size_t out_size)
              defaults.input_names[4],
              defaults.input_names[5],
              defaults.input_names[6],
-             defaults.input_names[7]);
+             defaults.input_names[7],
+             defaults.buzzer_start_resume_mml,
+             defaults.buzzer_pause_reset_mml,
+             defaults.buzzer_solved_mml,
+             defaults.buzzer_failed_mml);
+}
+
+void prop_engine_get_buzzer_mml_config(prop_buzzer_mml_config_t *out)
+{
+    if (!out) {
+        return;
+    }
+
+    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    copy_bounded(out->start_resume, sizeof(out->start_resume), s_ctx.cfg.buzzer_start_resume_mml);
+    copy_bounded(out->pause_reset, sizeof(out->pause_reset), s_ctx.cfg.buzzer_pause_reset_mml);
+    copy_bounded(out->solved, sizeof(out->solved), s_ctx.cfg.buzzer_solved_mml);
+    copy_bounded(out->failed, sizeof(out->failed), s_ctx.cfg.buzzer_failed_mml);
+    xSemaphoreGive(s_ctx.lock);
 }
 
 static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char *response, size_t response_size)

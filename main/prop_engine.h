@@ -28,6 +28,8 @@ typedef enum {
     PROP_LED_HINT_OTA,
 } prop_led_hint_t;
 
+#define PROP_BUZZER_MML_MAX_LEN 192
+
 typedef struct {
     int default_time_s;
     int penalty_s;
@@ -51,7 +53,18 @@ typedef struct {
     char lid_mode[20];
     char solution[9];
     char input_names[8][16];
+    char buzzer_start_resume_mml[PROP_BUZZER_MML_MAX_LEN];
+    char buzzer_pause_reset_mml[PROP_BUZZER_MML_MAX_LEN];
+    char buzzer_solved_mml[PROP_BUZZER_MML_MAX_LEN];
+    char buzzer_failed_mml[PROP_BUZZER_MML_MAX_LEN];
 } prop_config_t;
+
+typedef struct {
+    char start_resume[PROP_BUZZER_MML_MAX_LEN];
+    char pause_reset[PROP_BUZZER_MML_MAX_LEN];
+    char solved[PROP_BUZZER_MML_MAX_LEN];
+    char failed[PROP_BUZZER_MML_MAX_LEN];
+} prop_buzzer_mml_config_t;
 
 esp_err_t prop_engine_init(void);
 
@@ -64,3 +77,4 @@ esp_err_t prop_engine_apply_config_json(const char *json, bool persist, char *re
 esp_err_t prop_engine_restore_defaults(bool persist, char *response, size_t response_size);
 
 prop_led_hint_t prop_engine_get_led_hint(void);
+void prop_engine_get_buzzer_mml_config(prop_buzzer_mml_config_t *out);
