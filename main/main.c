@@ -6,10 +6,13 @@
 #include <ctype.h>
 #include <math.h>
 #include <string.h>
+#include <stdint.h>
 #include "esp_app_desc.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
+#include "esp_wifi.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/ledc.h"
@@ -35,6 +38,7 @@ static const char *TAG = "px-wifi-v1";
 #define SEG_E 0x10
 #define SEG_F 0x20
 #define SEG_G 0x40
+#define SEG_DP 0x80
 
 static bool s_display_ready;
 static i2c_master_bus_handle_t s_i2c_bus;
@@ -129,7 +133,10 @@ static void led_task(void *arg)
 
 static bool display_i2c_write_cmd(uint8_t cmd)
 {
-    esp_err_t err = i2c_master_transmit(s_display_dev, &cmd, 1, 100);
+    esp_err_t err = i2c_master_transmit(s_display_dev, &cmd, 1, 25);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "HT16K33 cmd 0x%02X failed: %s", cmd, esp_err_to_name(err));
+    }
     return err == ESP_OK;
 }
 
@@ -144,8 +151,38 @@ static bool display_i2c_write_frame(const uint16_t frame[8])
         buf[1 + i * 2 + 1] = (uint8_t)((frame[i] >> 8) & 0xFF);
     }
 
-    esp_err_t err = i2c_master_transmit(s_display_dev, buf, sizeof(buf), 100);
+    esp_err_t err = i2c_master_transmit(s_display_dev, buf, sizeof(buf), 25);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "HT16K33 frame write failed: %s", esp_err_to_name(err));
+    }
     return err == ESP_OK;
+}
+
+/* Re-send the HT16K33 wakeup/display-on sequence without extra logging. */
+static bool display_wake(void)
+{
+    return display_i2c_write_cmd(0x21) &&  /* oscillator on */
+           display_i2c_write_cmd(0x81) &&  /* display on, no blink */
+           display_i2c_write_cmd(0xEF);    /* max brightness */
+}
+
+/* Reset the I2C bus (releases any stuck slave), then re-arm display.
+ * Retries up to max_retries times with increasing delays.
+ * Returns true when the display responds successfully. */
+static bool display_ensure_wake(int max_retries)
+{
+    for (int i = 0; i < max_retries; i++) {
+        i2c_master_bus_reset(s_i2c_bus);
+        vTaskDelay(pdMS_TO_TICKS(50 + i * 50));
+        if (display_wake()) {
+            if (i > 0) {
+                ESP_LOGI(TAG, "HT16K33 recovered after %d reset(s)", i + 1);
+            }
+            return true;
+        }
+        ESP_LOGW(TAG, "HT16K33 unresponsive, reset attempt %d/%d", i + 1, max_retries);
+    }
+    return false;
 }
 
 static uint16_t seg_for_digit(int d)
@@ -186,6 +223,17 @@ static void display_render_dashes(uint16_t frame[8])
     for (i = 0; i < 4; ++i) {
         display_set_digit(frame, i, SEG_G);
     }
+}
+
+static void display_render_ready_chase(uint16_t frame[8], int64_t now_ms)
+{
+    int dot_idx;
+
+    display_render_blank(frame);
+
+    /* One dot advances once per second, left to right across 4 digits. */
+    dot_idx = (int)((now_ms / 1000) % 4);
+    display_set_digit(frame, dot_idx, SEG_DP);
 }
 
 static void display_render_mmss(uint16_t frame[8], int total_seconds, bool colon_on)
@@ -234,6 +282,42 @@ static void display_apply_progress_bars(uint16_t frame[8], uint8_t connected_mas
     }
 }
 
+/* Get WiFi signal strength in dots (1-4) based on RSSI.
+   1 dot = no connection or very poor (<-90 dBm)
+   2 dots = weak (-80 to -90 dBm)
+   3 dots = medium (-60 to -80 dBm)
+   4 dots = strong (>-60 dBm) */
+static int get_wifi_strength_dots(void)
+{
+    wifi_ap_record_t ap_info;
+    esp_err_t err = esp_wifi_sta_get_ap_info(&ap_info);
+    if (err != ESP_OK) {
+        return 1;  /* no connection */
+    }
+    
+    int rssi = ap_info.rssi;
+    if (rssi > -60) return 4;
+    if (rssi > -80) return 3;
+    if (rssi > -90) return 2;
+    return 1;
+}
+
+/* Render WiFi strength indicator: N dots blinking at 1 Hz */
+static void display_render_wifi_strength(uint16_t frame[8], int64_t now_ms)
+{
+    int dots = get_wifi_strength_dots();
+    bool blink_on = ((now_ms / 1000) % 2) == 0;
+    int i;
+    
+    display_render_blank(frame);
+    
+    if (blink_on) {
+        for (i = 0; i < dots && i < 4; ++i) {
+            display_set_digit(frame, i, SEG_DP);
+        }
+    }
+}
+
 static bool lid_forces_blank(const char *lid_mode)
 {
     int level;
@@ -257,41 +341,45 @@ static void display_task(void *arg)
 {
     (void)arg;
 
-    /* --- Boot test: show 8888 for 3 seconds so user can confirm I2C works --- */
-    {
-        uint16_t test_frame[8] = {0};
-        uint16_t all8 = SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G;
-        test_frame[0] = all8;
-        test_frame[1] = all8;
-        test_frame[2] = 0x02; /* colon */
-        test_frame[3] = all8;
-        test_frame[4] = all8;
-        for (int t = 0; t < 30; ++t) {
-            bool ok = display_i2c_write_frame(test_frame);
-            if (t == 0) {
-                ESP_LOGI(TAG, "Display boot test write: %s", ok ? "OK" : "FAILED");
-            }
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
+    /* Wait for WiFi radio activity to settle before attempting I2C. */
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    /* Ensure the HT16K33 is armed, retrying through any RF-induced glitches. */
+    if (!display_ensure_wake(10)) {
+        ESP_LOGE(TAG, "HT16K33 unresponsive after 10 resets — display task exiting");
+        vTaskDelete(NULL);
+        return;
     }
-    /* --- End boot test --- */
 
     uint16_t last_frame[8] = {0xFFFF};
     prop_runtime_snapshot_t snap;
     prop_state_t prev_state = PROP_STATE_NOT_READY;
     int frozen_result_seconds = 0;
+    int last_live_seconds = 0;
     int64_t result_enter_ms = 0;
 
     while (true) {
         uint16_t frame[8];
         int64_t now_ms = esp_timer_get_time() / 1000;
-        bool colon_on = ((now_ms / 1000) % 2) == 0;
+        bool colon_on_1hz = ((now_ms / 1000) % 2) == 0;
+        uint32_t refresh_ms = 100;  /* default faster refresh */
 
         prop_engine_get_runtime_snapshot(&snap);
 
+        if (snap.state == PROP_STATE_COUNTDOWN || snap.state == PROP_STATE_PAUSED) {
+            last_live_seconds = snap.time_remaining_ms / 1000;
+            if (last_live_seconds < 0) {
+                last_live_seconds = 0;
+            }
+        }
+
         if (snap.state != prev_state &&
             (snap.state == PROP_STATE_DEFUSED || snap.state == PROP_STATE_DETONATED)) {
-            frozen_result_seconds = snap.time_remaining_ms / 1000;
+            if (prev_state == PROP_STATE_COUNTDOWN || prev_state == PROP_STATE_PAUSED) {
+                frozen_result_seconds = last_live_seconds;
+            } else {
+                frozen_result_seconds = snap.time_remaining_ms / 1000;
+            }
             if (frozen_result_seconds < 0) {
                 frozen_result_seconds = 0;
             }
@@ -302,15 +390,18 @@ static void display_task(void *arg)
         if (lid_forces_blank(snap.lid_mode)) {
             display_render_blank(frame);
         } else if (snap.state == PROP_STATE_READY) {
-            display_render_blank(frame);
+            /* In READY state, show WiFi strength indicator and use slower refresh
+             * to allow light sleep to be more effective. */
+            display_render_wifi_strength(frame, now_ms);
+            refresh_ms = 1000;  /* Update once per second */
         } else if (snap.state == PROP_STATE_NOT_READY) {
             display_render_dashes(frame);
             display_apply_progress_bars(frame, snap.connected_mask, snap.wire_count);
         } else if (snap.state == PROP_STATE_COUNTDOWN || snap.state == PROP_STATE_PAUSED) {
-            display_render_mmss(frame, snap.time_remaining_ms / 1000, colon_on);
+            display_render_mmss(frame, snap.time_remaining_ms / 1000, colon_on_1hz);
         } else if (snap.state == PROP_STATE_DEFUSED || snap.state == PROP_STATE_DETONATED) {
             if ((now_ms - result_enter_ms) <= 120000) {
-                display_render_mmss(frame, frozen_result_seconds, colon_on);
+                display_render_mmss(frame, frozen_result_seconds, true);
             } else {
                 display_render_blank(frame);
             }
@@ -320,13 +411,15 @@ static void display_task(void *arg)
 
         if (memcmp(frame, last_frame, sizeof(frame)) != 0) {
             if (!display_i2c_write_frame(frame)) {
-                ESP_LOGW(TAG, "HT16K33 frame update failed");
+                /* Write failed — reset the bus and re-arm, then force a retry next cycle. */
+                display_ensure_wake(3);
+                memset(last_frame, 0xFF, sizeof(last_frame));
             } else {
                 memcpy(last_frame, frame, sizeof(frame));
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(refresh_ms));
     }
 }
 
@@ -354,6 +447,9 @@ static void init_display(void)
         return;
     }
 
+    ESP_LOGI(TAG, "I2C probe 0x70-0x77 (SDA=GPIO%d SCL=GPIO%d @ %dHz)",
+             DISP_I2C_SDA, DISP_I2C_SCL, DISP_I2C_FREQ_HZ);
+    int nack_count = 0, timeout_count = 0, other_count = 0;
     for (addr = 0x70; addr <= 0x77; ++addr) {
         err = i2c_master_probe(s_i2c_bus, addr, 50);
         if (err == ESP_OK) {
@@ -361,11 +457,24 @@ static void init_display(void)
             found = true;
             ESP_LOGI(TAG, "I2C device found at 0x%02X", addr);
             break;
+        } else if (err == ESP_ERR_NOT_FOUND) {
+            nack_count++;
+        } else if (err == ESP_ERR_TIMEOUT) {
+            timeout_count++;
+        } else {
+            other_count++;
         }
     }
 
     if (!found) {
-        ESP_LOGW(TAG, "No I2C device found at 0x70-0x77 (check SDA/SCL/power)");
+        if (timeout_count > 0) {
+            ESP_LOGW(TAG, "No I2C device found at 0x70-0x77 (bus timeout; check SDA/SCL/power)");
+        } else if (nack_count > 0) {
+            ESP_LOGW(TAG, "No I2C device found at 0x70-0x77 (bus alive, address mismatch?)");
+        } else {
+            ESP_LOGW(TAG, "No I2C device found at 0x70-0x77 (unexpected probe error)");
+        }
+        ESP_LOGI(TAG, "I2C probe summary: NACK=%d TIMEOUT=%d OTHER=%d", nack_count, timeout_count, other_count);
         return;
     }
 
@@ -387,18 +496,6 @@ static void init_display(void)
     if (!display_i2c_write_cmd(0xEF)) {
         ESP_LOGW(TAG, "HT16K33 brightness command failed");
         return;
-    }
-
-    {
-        uint16_t test_frame[8] = {0};
-        uint16_t all8 = SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G;
-        test_frame[0] = all8;
-        test_frame[1] = all8;
-        test_frame[2] = 0x02; /* colon on */
-        test_frame[3] = all8;
-        test_frame[4] = all8;
-        bool write_ok = display_i2c_write_frame(test_frame);
-        ESP_LOGI(TAG, "HT16K33 test pattern write: %s", write_ok ? "OK" : "FAILED");
     }
 
     s_display_ready = true;
@@ -759,6 +856,30 @@ static void init_buzzer(void)
     buzzer_set(false, 0, 0);
 }
 
+/* GPIO interrupt handler: wake from light sleep when a wire is disconnected */
+static void IRAM_ATTR wire_gpio_isr_handler(void *arg)
+{
+    /* ISR just needs to wake the MCU; state change will be detected in the main tasks. */
+    (void)arg;
+}
+
+/* Configure GPIO edge detection on wire inputs for light sleep wake */
+static void init_wire_gpio_interrupts(void)
+{
+    /* Wire inputs are typically GPIO3-GPIO6 on ESP32-S3 DevKitC-1 */
+    const int wire_gpios[] = {3, 4, 5, 6};
+    int i;
+
+    gpio_install_isr_service(0);
+    
+    for (i = 0; i < 4; ++i) {
+        gpio_isr_handler_add(wire_gpios[i], wire_gpio_isr_handler, (void *)(intptr_t)i);
+        /* Trigger on HIGH (wire disconnect = logic HIGH) */
+        gpio_set_intr_type(wire_gpios[i], GPIO_INTR_POSEDGE);
+        ESP_LOGI(TAG, "Configured GPIO %d for wire disconnect detection", wire_gpios[i]);
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting px-wifi-v1");
@@ -777,13 +898,20 @@ void app_main(void)
     ESP_ERROR_CHECK(prop_engine_init());
     xTaskCreate(led_task, "led_status", 3072, NULL, 5, NULL);
 
+    init_buzzer();
+    xTaskCreate(buzzer_task, "buzzer_status", 3072, NULL, 5, NULL);
+
+    /* Start web/wifi first — its radio init causes a 5V power surge that can
+     * disrupt I2C.  Initialise the display after wifi is up to avoid this. */
+    ESP_ERROR_CHECK(web_ui_start());
+
+    /* Light sleep is enabled automatically via FreeRTOS tickless idle —
+     * no need for explicit esp_pm_configure(). Tasks will sleep during vTaskDelay(). */
+    
+    init_wire_gpio_interrupts();
+
     init_display();
     if (s_display_ready) {
         xTaskCreate(display_task, "display_status", 4096, NULL, 5, NULL);
     }
-
-    init_buzzer();
-    xTaskCreate(buzzer_task, "buzzer_status", 3072, NULL, 5, NULL);
-
-    ESP_ERROR_CHECK(web_ui_start());
 }

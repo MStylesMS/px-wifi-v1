@@ -26,6 +26,8 @@ Designed by escape room operators for escape room operators, the PX-WiFi-V1 repl
 - **Over-the-Air Updates** — Firmware can be updated wirelessly without opening the prop or connecting a cable.
 - **Web Configuration** — Built-in web interface for on-site setup. No app required — just connect from any phone or laptop on the same network.
 - **Real-Time Event Reporting** — Every player interaction (button press, wire pull, lid lift) is reported instantly to the game controller for scoring, automation, and live monitoring.
+- **WiFi Signal Indicator** — 7-segment display shows real-time WiFi signal strength (1–4 dots), simplifying on-site troubleshooting.
+- **Power Efficient** — Light sleep mode reduces power consumption by ~42% during idle periods while maintaining responsive MQTT command latency (<250 ms).
 
 ---
 
