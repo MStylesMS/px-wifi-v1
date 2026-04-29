@@ -108,13 +108,13 @@ Reference: https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/es
 | 5V | — | From 5V rail via connector |
 | GND | — | Common ground |
 
-### 3.6 RS-485 Port (Option 2)
+### 3.6 AUX GPIO / Wire Ground Port
 
 | Function | Pin Name | Notes |
 |----------|----------|-------|
-| TX | `RS485_TX` | UART TX to transceiver DI |
-| RX | `RS485_RX` | UART RX from transceiver RO |
-| Driver Enable | `RS485_DE` | Controls DE and ~RE (tied together) |
+| Wire Ground Drive | `WIRE_GND_DRV` | GPIO8. Reserved as output LOW to provide common return for harness wire inputs. |
+| Aux GPIO 2 | `AUX_GPIO_2` | GPIO21 (general-purpose I/O) |
+| Aux GPIO 3 | `AUX_GPIO_3` | GPIO47 (general-purpose I/O) |
 
 ### 3.7 Status LED
 
@@ -128,7 +128,7 @@ Reference: https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s3/es
 |----------|----------|-------|
 | USB D+ | `USB_DP` | USB-Serial/JTAG (built-in) |
 | USB D- | `USB_DM` | USB-Serial/JTAG (built-in) |
-| Battery ADC | `BATT_SENSE` | Voltage divider from Vin (÷3 or ÷4 to stay under 3.3V) |
+| Battery ADC | `BATT_SENSE` | GPIO9 / ADC1_CH8. Voltage divider from Vin using R1 = 21.6 kOhm and R2 = 4.43 kOhm (15V in -> about 2.55V at the ADC pin) |
 
 ---
 
@@ -199,7 +199,7 @@ Firmware lid gating modes for display blanking:
 | Wiring harness | 12+ | 8 GPIO + power + ground |
 | I2C display | 4 (SDA, SCL, 5V, GND) | 7-segment countdown display |
 | SPI display | 6 (MOSI, MISO, SCLK, CS, 5V, GND) | Future: RGB matrix |
-| RS-485 | 3 logic + A/B/GND | Differential bus via external transceiver |
+| AUX GPIO | 3 logic + GND | General-purpose expansion I/O |
 | Buzzer | 2 (signal, GND) | Piezo buzzer |
 | USB-C | — | Programming and debug (built into DevKitC-1) |
 

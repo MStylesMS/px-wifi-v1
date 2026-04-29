@@ -1,0 +1,9 @@
+{
+  "workbench.colorTheme": "Code Green",
+  "workbench.settings.applyToAllProfiles": [
+    "workbench.colorTheme"
+  ],
+  "idf.port": "/dev/tty.usbmodem14441301",
+  "idf.flashType": "UART",
+  "idf.saveScope": "workspaceFolder"
+}

@@ -31,10 +31,15 @@ static const gpio_num_t s_wire_input_gpios[8] = {
     GPIO_NUM_18,  /* INPUT_8 lid_switch */
 };
 
+/* GPIO8 is reserved as the common low-side return for wire harness inputs. */
+static const gpio_num_t s_wire_ground_gpio = GPIO_NUM_8;
+
 #define BATTERY_MAX_POINTS 20
 #define BATTERY_FILE_PATH "/spiffs/battery_profile.json"
 #define BATTERY_EXTERNAL_THRESHOLD_MV 5000
 #define BATTERY_ADC_MAX_VALUE 4095
+#define BATTERY_DIVIDER_R1_OHMS 21600
+#define BATTERY_DIVIDER_R2_OHMS 4430
 #define BATTERY_ADC_FULL_SCALE_MV 15000
 
 typedef struct {
@@ -204,6 +209,39 @@ static esp_err_t init_wire_inputs(void)
     return ESP_OK;
 }
 
+static esp_err_t init_wire_ground_drive(void)
+{
+    esp_err_t err;
+
+    err = gpio_reset_pin(s_wire_ground_gpio);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_reset_pin(%d) failed: %s", s_wire_ground_gpio, esp_err_to_name(err));
+        return err;
+    }
+
+    gpio_config_t io_cfg = {
+        .pin_bit_mask = (1ULL << s_wire_ground_gpio),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    err = gpio_config(&io_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_config(%d) failed: %s", s_wire_ground_gpio, esp_err_to_name(err));
+        return err;
+    }
+
+    err = gpio_set_level(s_wire_ground_gpio, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_set_level(%d,0) failed: %s", s_wire_ground_gpio, esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "GPIO %d configured as wire ground drive (OUTPUT LOW)", s_wire_ground_gpio);
+    return ESP_OK;
+}
+
 static void wire_input_task(void *arg)
 {
     int stable_count[8] = {0};
@@ -328,30 +366,47 @@ static bool sanitize_solution_vector(const char *src, char *out, size_t out_size
     return w > 0;
 }
 
+static int battery_divider_sense_mv_from_input_mv(int input_mv)
+{
+    int64_t num = (int64_t)input_mv * BATTERY_DIVIDER_R2_OHMS;
+    int denom = BATTERY_DIVIDER_R1_OHMS + BATTERY_DIVIDER_R2_OHMS;
+
+    return (int)(num / denom);
+}
+
+static int battery_divider_input_mv_from_sense_mv(int sense_mv)
+{
+    int64_t num = (int64_t)sense_mv * (BATTERY_DIVIDER_R1_OHMS + BATTERY_DIVIDER_R2_OHMS);
+
+    return (int)(num / BATTERY_DIVIDER_R2_OHMS);
+}
+
 static int battery_voltage_mv_from_adc_raw(int adc_raw)
 {
     int denom = s_ctx.battery_adc_at_15v - s_ctx.battery_adc_at_0v;
-    int num;
+    int sense_ref_mv = battery_divider_sense_mv_from_input_mv(BATTERY_ADC_FULL_SCALE_MV);
+    int64_t sense_mv;
 
     if (denom <= 0) {
         return clamp_int(s_ctx.battery_voltage_mv, 0, BATTERY_ADC_FULL_SCALE_MV);
     }
 
-    num = (adc_raw - s_ctx.battery_adc_at_0v) * BATTERY_ADC_FULL_SCALE_MV;
-    return clamp_int(num / denom, 0, BATTERY_ADC_FULL_SCALE_MV);
+    sense_mv = ((int64_t)(adc_raw - s_ctx.battery_adc_at_0v) * sense_ref_mv) / denom;
+    return clamp_int(battery_divider_input_mv_from_sense_mv((int)sense_mv), 0, BATTERY_ADC_FULL_SCALE_MV);
 }
 
 static int battery_adc_raw_from_voltage_mv(int mv)
 {
-    int denom = BATTERY_ADC_FULL_SCALE_MV;
-    int num;
+    int sense_ref_mv = battery_divider_sense_mv_from_input_mv(BATTERY_ADC_FULL_SCALE_MV);
+    int sense_mv = battery_divider_sense_mv_from_input_mv(clamp_int(mv, 0, BATTERY_ADC_FULL_SCALE_MV));
+    int64_t num;
 
     if (s_ctx.battery_adc_at_15v <= s_ctx.battery_adc_at_0v) {
         return clamp_int(s_ctx.battery_adc_raw, 0, BATTERY_ADC_MAX_VALUE);
     }
 
-    num = mv * (s_ctx.battery_adc_at_15v - s_ctx.battery_adc_at_0v);
-    return clamp_int(s_ctx.battery_adc_at_0v + (num / denom), 0, BATTERY_ADC_MAX_VALUE);
+    num = (int64_t)sense_mv * (s_ctx.battery_adc_at_15v - s_ctx.battery_adc_at_0v);
+    return clamp_int(s_ctx.battery_adc_at_0v + (int)(num / sense_ref_mv), 0, BATTERY_ADC_MAX_VALUE);
 }
 
 static const battery_profile_builtin_t *find_builtin_profile(const char *name)
@@ -564,12 +619,14 @@ static void set_default_config(prop_config_t *cfg)
     snprintf(cfg->input_names[6], sizeof(cfg->input_names[6]), "brown");
     snprintf(cfg->input_names[7], sizeof(cfg->input_names[7]), "purple");
 
+    /* Old start tune: "T168 O5 L16 V70 A R D" */
     snprintf(cfg->buzzer_start_resume_mml,
              sizeof(cfg->buzzer_start_resume_mml),
-             "T168 O5 L16 V70 A R D");
+             "T200 O6 L32 V80 C R C");
+    /* Old pause tune: "T156 O5 L16 V65 D R G4" */
     snprintf(cfg->buzzer_pause_reset_mml,
              sizeof(cfg->buzzer_pause_reset_mml),
-             "T156 O5 L16 V65 D R G4");
+             "T200 O5 L32 V80 C R C");
     snprintf(cfg->buzzer_solved_mml,
              sizeof(cfg->buzzer_solved_mml),
              "T184 O5 L16 V78 C E G R C6 R C6 E6 G6 L8 C7");
@@ -1458,6 +1515,7 @@ esp_err_t prop_engine_init(void)
     set_default_battery_config();
 
     (void)init_spiffs();
+    ESP_ERROR_CHECK(init_wire_ground_drive());
     ESP_ERROR_CHECK(init_wire_inputs());
 
     /* Small delay to let pins settle after config */

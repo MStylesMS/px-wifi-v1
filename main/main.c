@@ -21,7 +21,7 @@
 
 static const char *TAG = "px-wifi-v1";
 
-#define PIEZO_GPIO      47
+#define PIEZO_GPIO      14
 #define BUZZER_DUTY_50  512
 #define BUZZER_MAX_NOTES 96
 
@@ -30,6 +30,10 @@ static const char *TAG = "px-wifi-v1";
 #define DISP_I2C_SCL 2
 #define DISP_I2C_FREQ_HZ 100000
 #define DISP_HT16K33_ADDR_DEFAULT 0x70
+
+#if BOARD_RGB_LED_COUNT < 1 || BOARD_RGB_LED_COUNT > DRV_RGB_LED_MAX_LEDS
+#error "BOARD_RGB_LED_COUNT must be in range 1..DRV_RGB_LED_MAX_LEDS"
+#endif
 
 #define SEG_A 0x01
 #define SEG_B 0x02

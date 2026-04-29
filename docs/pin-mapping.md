@@ -49,17 +49,17 @@ The ESP32-S3 chip has GPIO 0–48 (49 total). On the WROOM-1 module and DevKitC-
 | `AUX_OUT_2` | `GPIO_NUM_39` | 39 | — | Low-power output |
 | `AUX_OUT_3` | `GPIO_NUM_40` | 40 | — | Low-power output |
 | `AUX_OUT_4` | `GPIO_NUM_41` | 41 | — | Low-power output |
-| `PIEZO_PWM` | `GPIO_NUM_47` | 47 | — | PWM audio output |
-| `BATT_SENSE` | `GPIO_NUM_8` | 8 | ADC1_CH7 | Battery voltage sense |
+| `PIEZO_PWM` | `GPIO_NUM_14` | 14 | ADC2_CH3 | PWM audio output |
+| `BATT_SENSE` | `GPIO_NUM_9` | 9 | ADC1_CH8 | Battery voltage sense via 21.6 kOhm / 4.43 kOhm divider |
 | `I2C_SDA` | `GPIO_NUM_1` | 1 | ADC1_CH0 | I2C data |
 | `I2C_SCL` | `GPIO_NUM_2` | 2 | ADC1_CH1 | I2C clock |
 | `SPI_MOSI` | `GPIO_NUM_11` | 11 | ADC2_CH0 | SPI data out |
 | `SPI_MISO` | `GPIO_NUM_13` | 13 | ADC2_CH2 | SPI data in |
 | `SPI_SCLK` | `GPIO_NUM_12` | 12 | ADC2_CH1 | SPI clock |
 | `SPI_CS` | `GPIO_NUM_10` | 10 | ADC1_CH9 | SPI chip select |
-| `RS485_TX` | `GPIO_NUM_9` | 9 | ADC1_CH8 | RS-485 UART TX |
-| `RS485_RX` | `GPIO_NUM_21` | 21 | — | RS-485 UART RX |
-| `RS485_DE` | `GPIO_NUM_14` | 14 | ADC2_CH3 | RS-485 DE/~RE control |
+| `WIRE_GND_DRV` | `GPIO_NUM_8` | 8 | ADC1_CH7 | Wire harness common return (output LOW) |
+| `AUX_GPIO_2` | `GPIO_NUM_21` | 21 | — | General-purpose AUX GPIO |
+| `AUX_GPIO_3` | `GPIO_NUM_47` | 47 | — | General-purpose AUX GPIO |
 | `STATUS_LED` | `GPIO_NUM_48` | 48 | — | Status LED (WS2812) |
 | `USB_DP` | `GPIO_NUM_20` | 20 | — | USB D+ (reserved) |
 | `USB_DM` | `GPIO_NUM_19` | 19 | — | USB D- (reserved) |
@@ -75,11 +75,18 @@ The ESP32-S3 chip has GPIO 0–48 (49 total). On the WROOM-1 module and DevKitC-
 - **RED/GRN/YLW/BLU wires on GPIO 4–7:** Sequential block in the low-numbered range. ADC-capable, which allows analog sensing (e.g., detecting partial wire connections or variable resistance inputs in future puzzles).
 - **AUX_IN_1..3 + LID_SWITCH on GPIO 15–18:** Sequential block. ADC2-capable (note: ADC2 cannot be used while WiFi is active, but these are digital inputs so it doesn't matter).
 - **AUX_OUT_1..4 on GPIO 38–41:** High-numbered GPIOs with no ADC capability — no waste assigning them to digital outputs. Sequential block for clean wiring.
-- **PIEZO_PWM on GPIO 47:** High-numbered, near the LED (48). No ADC, perfect for PWM.
-- **BATT_SENSE on GPIO 8:** ADC1_CH7 — on ADC1 which works alongside WiFi (unlike ADC2).
+- **PIEZO_PWM on GPIO 14:** Clean general-purpose GPIO with LEDC support. ADC2 capability is irrelevant for PWM output.
+- **BATT_SENSE on GPIO 9:** ADC1_CH8 — on ADC1 which works alongside WiFi (unlike ADC2). Divider is R1 = 21.6 kOhm high-side and R2 = 4.43 kOhm low-side, so 15V input appears as about 2.55V at the pin.
 - **I2C on GPIO 1–2:** Matches the DevKitC-1 default and common ESP32-S3 convention.
 - **SPI on GPIO 10–13:** Matches the DevKitC-1 default and common ESP32-S3 convention.
-- **RS-485 (Option 2):** TX on GPIO 9, RX on GPIO 21, DE/~RE on GPIO 14. Uses clean spare pins and avoids USB/JTAG pins.
+- **Wire ground drive on GPIO 8:** Dedicated low-side return for the wire harness, configured as output LOW at startup.
+- **AUX GPIO expansion:** GPIO 21 and 47 remain available as general-purpose AUX GPIOs.
+
+### GPIO notes (GPIO 8, 21, 47)
+
+- **GPIO 8:** No strapping or boot-mode caveats. Reserved in this revision as `WIRE_GND_DRV` and driven LOW.
+- **GPIO 21:** No strapping caveats; safe as general-purpose input/output.
+- **GPIO 47:** No strapping caveats; safe as general-purpose input/output. No ADC capability.
 
 ---
 
@@ -98,15 +105,15 @@ The ESP32-S3 chip has GPIO 0–48 (49 total). On the WROOM-1 module and DevKitC-
 | Aux Input 2 | AUX_IN_2 | GPIO16 |x| GPIO39 | AUX_OUT_2 | Output 2 |
 | Aux Input 3 | AUX_IN_3 | GPIO17 |x| GPIO38 | AUX_OUT_1 | Output 1 |
 | Lid Switch | LID_SWITCH | GPIO18 |x| GPIO37 | - | Module internal |
-| Battery Sense | BATT_SENSE | GPIO8 |x| GPIO36 | - | Module internal |
+| Wire Ground Drive | WIRE_GND_DRV | GPIO8 |x| GPIO36 | - | Module internal |
 | Strap / Reserved | - | GPIO3 |x| GPIO35 | - | Module internal |
 | Input-only Strap | - | GPIO46 |x| GPIO0 | - | Boot strap |
-| RS-485 TX | RS485_TX | GPIO9 |x| GPIO45 | - | Strap / reserved |
+| Battery Sense | BATT_SENSE | GPIO9 |x| GPIO45 | - | Strap / reserved |
 | SPI CS | SPI_CS | GPIO10 |x| GPIO48 | STATUS_LED | WS2812 LED |
-| SPI MOSI | SPI_MOSI | GPIO11 |x| GPIO47 | PIEZO_PWM | Buzzer PWM |
-| SPI SCLK | SPI_SCLK | GPIO12 |x| GPIO21 | RS485_RX | RS-485 RX |
+| SPI MOSI | SPI_MOSI | GPIO11 |x| GPIO47 | AUX_GPIO_3 | Aux GPIO 3 |
+| SPI SCLK | SPI_SCLK | GPIO12 |x| GPIO21 | AUX_GPIO_2 | Aux GPIO 2 |
 | SPI MISO | SPI_MISO | GPIO13 |x| GPIO20 | USB_DP | USB D+ |
-| RS-485 DE | RS485_DE | GPIO14 |x| GPIO19 | USB_DM | USB D- |
+| Buzzer PWM | PIEZO_PWM | GPIO14 |x| GPIO19 | USB_DM | USB D- |
 | 5V PWR In/Out | - | 5V |x| GND | - | Ground |
 | Ground | - | GND |x| GND | - | Ground |
 
