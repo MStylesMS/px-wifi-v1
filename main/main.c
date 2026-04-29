@@ -10,6 +10,7 @@
 #include "esp_app_desc.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "esp_pm.h"
 #include "esp_wifi.h"
@@ -30,6 +31,7 @@ static const char *TAG = "px-wifi-v1";
 #define DISP_I2C_SCL 2
 #define DISP_I2C_FREQ_HZ 100000
 #define DISP_HT16K33_ADDR_DEFAULT 0x70
+#define DEEP_SLEEP_WAKE_GPIO 4
 
 #if BOARD_RGB_LED_COUNT < 1 || BOARD_RGB_LED_COUNT > DRV_RGB_LED_MAX_LEDS
 #error "BOARD_RGB_LED_COUNT must be in range 1..DRV_RGB_LED_MAX_LEDS"
@@ -52,6 +54,56 @@ static uint8_t s_display_addr = DISP_HT16K33_ADDR_DEFAULT;
 static uint8_t lerp_u8(uint8_t a, uint8_t b, int num, int den)
 {
     return (uint8_t)(a + ((b - a) * num) / den);
+}
+
+static const char *wakeup_cause_name(esp_sleep_wakeup_cause_t cause)
+{
+    switch (cause) {
+        case ESP_SLEEP_WAKEUP_UNDEFINED:
+            return "undefined";
+        case ESP_SLEEP_WAKEUP_EXT0:
+            return "ext0";
+        case ESP_SLEEP_WAKEUP_EXT1:
+            return "ext1";
+        case ESP_SLEEP_WAKEUP_TIMER:
+            return "timer";
+        case ESP_SLEEP_WAKEUP_TOUCHPAD:
+            return "touchpad";
+        case ESP_SLEEP_WAKEUP_ULP:
+            return "ulp";
+        case ESP_SLEEP_WAKEUP_GPIO:
+            return "gpio";
+        case ESP_SLEEP_WAKEUP_UART:
+            return "uart";
+        case ESP_SLEEP_WAKEUP_WIFI:
+            return "wifi";
+        case ESP_SLEEP_WAKEUP_COCPU:
+            return "cocpu";
+        case ESP_SLEEP_WAKEUP_COCPU_TRAP_TRIG:
+            return "cocpu_trap";
+        case ESP_SLEEP_WAKEUP_BT:
+            return "bt";
+        default:
+            return "other";
+    }
+}
+
+static void log_boot_wakeup_info(void)
+{
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+    ESP_LOGI(TAG, "Wakeup cause: %s (%d)", wakeup_cause_name(cause), (int)cause);
+
+    if (cause == ESP_SLEEP_WAKEUP_EXT1) {
+        uint64_t ext1_mask = esp_sleep_get_ext1_wakeup_status();
+        bool wake_gpio_triggered = (ext1_mask & (1ULL << DEEP_SLEEP_WAKE_GPIO)) != 0;
+
+        ESP_LOGI(TAG,
+                 "EXT1 wake mask: 0x%llx, gpio%d_triggered=%s",
+                 (unsigned long long)ext1_mask,
+                 DEEP_SLEEP_WAKE_GPIO,
+                 wake_gpio_triggered ? "true" : "false");
+    }
 }
 
 static rgb_color_t scale_color(rgb_color_t c, uint8_t level)
@@ -887,6 +939,7 @@ static void init_wire_gpio_interrupts(void)
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting px-wifi-v1");
+    log_boot_wakeup_info();
 
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "Build info: id=%s date=%s time=%s", app->version, app->date, app->time);

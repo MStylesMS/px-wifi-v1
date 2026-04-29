@@ -41,6 +41,8 @@ static const gpio_num_t s_wire_ground_gpio = GPIO_NUM_8;
 #define BATTERY_DIVIDER_R1_OHMS 21600
 #define BATTERY_DIVIDER_R2_OHMS 4430
 #define BATTERY_ADC_FULL_SCALE_MV 15000
+#define LOW_BATTERY_CUTOFF_DELAY_MS 15000
+#define DEEP_SLEEP_WAKE_GPIO GPIO_NUM_4
 
 typedef struct {
     int mv;
@@ -116,6 +118,7 @@ typedef struct {
 
     char battery_profile[24];
     int low_battery_percent;
+    int low_battery_cutoff_percent;
     int battery_shutdown_delay_s;
     int battery_adc_raw;
     int battery_adc_at_0v;
@@ -124,6 +127,7 @@ typedef struct {
     int battery_percent;
     bool battery_low;
     int64_t battery_zero_since_ms;
+    int64_t battery_cutoff_since_ms;
     battery_point_t battery_points[BATTERY_MAX_POINTS];
     int battery_point_count;
 
@@ -136,6 +140,35 @@ static prop_ctx_t s_ctx;
 static void prop_engine_get_state_json_unlocked(char *out, size_t out_size);
 static void handle_disconnect_unlocked(int idx);
 static void handle_connect_unlocked(int idx);
+
+static void configure_deep_sleep_wake_gpio(void)
+{
+    gpio_num_t wake_gpio = DEEP_SLEEP_WAKE_GPIO;
+    int level = gpio_get_level(wake_gpio);
+    esp_sleep_ext1_wakeup_mode_t mode =
+        (level == 0) ? ESP_EXT1_WAKEUP_ANY_HIGH : ESP_EXT1_WAKEUP_ANY_LOW;
+    esp_err_t err;
+
+    /* Ensure wake source selection starts from a known state. */
+    err = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear wake sources: %s", esp_err_to_name(err));
+    }
+
+    err = esp_sleep_enable_ext1_wakeup_io((1ULL << wake_gpio), mode);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Failed to configure deep sleep wake on GPIO %d: %s",
+                 wake_gpio,
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG,
+                 "Deep sleep wake armed on GPIO %d (current=%d, mode=%s)",
+                 wake_gpio,
+                 level,
+                 (mode == ESP_EXT1_WAKEUP_ANY_HIGH) ? "ANY_HIGH" : "ANY_LOW");
+    }
+}
 
 static esp_err_t init_wire_inputs(void)
 {
@@ -573,6 +606,7 @@ static void set_default_battery_config(void)
 
     copy_bounded(s_ctx.battery_profile, sizeof(s_ctx.battery_profile), "unknown");
     s_ctx.low_battery_percent = 40;
+    s_ctx.low_battery_cutoff_percent = 20;
     s_ctx.battery_shutdown_delay_s = 60;
     s_ctx.battery_adc_at_0v = 0;
     s_ctx.battery_adc_at_15v = BATTERY_ADC_MAX_VALUE;
@@ -582,6 +616,7 @@ static void set_default_battery_config(void)
     s_ctx.battery_voltage_mv = 5200;
     s_ctx.battery_adc_raw = battery_adc_raw_from_voltage_mv(s_ctx.battery_voltage_mv);
     s_ctx.battery_zero_since_ms = 0;
+    s_ctx.battery_cutoff_since_ms = 0;
     update_battery_runtime_unlocked();
 }
 
@@ -869,6 +904,7 @@ static esp_err_t save_config_file(void)
             "  \"deepSleepWindowSec\": %d,\n"
             "  \"maxIdleCycleSec\": %d,\n"
             "  \"timeToleranceMs\": %d,\n"
+            "  \"lowBatteryCutoffPercent\": %d,\n"
             "  \"keepSyncEnabled\": %s,\n"
             "  \"mode\": \"%s\",\n"
             "  \"lidMode\": \"%s\",\n"
@@ -901,6 +937,7 @@ static esp_err_t save_config_file(void)
             s_ctx.cfg.deep_sleep_window_s,
             s_ctx.cfg.max_idle_cycle_s,
             s_ctx.cfg.time_tolerance_ms,
+            s_ctx.low_battery_cutoff_percent,
             s_ctx.cfg.keep_sync_enabled ? "true" : "false",
             s_ctx.cfg.mode,
             s_ctx.cfg.lid_mode,
@@ -1005,6 +1042,9 @@ static void apply_config_json_unlocked(const char *json)
     }
     if (json_extract_int(json, "timeToleranceMs", &i_val) && i_val >= 0 && i_val <= 10000) {
         s_ctx.cfg.time_tolerance_ms = i_val;
+    }
+    if (json_extract_int(json, "lowBatteryCutoffPercent", &i_val)) {
+        s_ctx.low_battery_cutoff_percent = clamp_int(i_val, 0, 100);
     }
     if (json_extract_int(json, "keepSyncMaxDriftMs", &i_val) && i_val >= 0 && i_val <= 10000) {
         s_ctx.cfg.keep_sync_max_drift_ms = i_val;
@@ -1459,26 +1499,49 @@ static void timer_task(void *arg)
         }
 
         if ((now_ms() % 1000) < 120) {
+            int64_t now = now_ms();
             update_battery_runtime_unlocked();
 
             if (s_ctx.battery_percent <= 0) {
                 if (s_ctx.battery_zero_since_ms == 0) {
-                    s_ctx.battery_zero_since_ms = now_ms();
+                    s_ctx.battery_zero_since_ms = now;
                 }
-                if ((now_ms() - s_ctx.battery_zero_since_ms) >=
+                if ((now - s_ctx.battery_zero_since_ms) >=
                     (int64_t)s_ctx.battery_shutdown_delay_s * 1000) {
                     should_deep_sleep = true;
                 }
             } else {
                 s_ctx.battery_zero_since_ms = 0;
             }
+
+            if (s_ctx.low_battery_cutoff_percent > 0 &&
+                s_ctx.battery_percent <= s_ctx.low_battery_cutoff_percent) {
+                if (s_ctx.battery_cutoff_since_ms == 0) {
+                    s_ctx.battery_cutoff_since_ms = now;
+                }
+                if ((now - s_ctx.battery_cutoff_since_ms) >= LOW_BATTERY_CUTOFF_DELAY_MS) {
+                    should_deep_sleep = true;
+                }
+            } else {
+                s_ctx.battery_cutoff_since_ms = 0;
+            }
         }
 
         xSemaphoreGive(s_ctx.lock);
 
         if (should_deep_sleep) {
-            ESP_LOGW(TAG, "Battery reached 0%% for %d seconds, entering deep sleep",
-                     s_ctx.battery_shutdown_delay_s);
+            if (s_ctx.low_battery_cutoff_percent > 0 &&
+                s_ctx.battery_percent <= s_ctx.low_battery_cutoff_percent) {
+                ESP_LOGW(TAG,
+                         "Battery stayed at or below cutoff (%d%% <= %d%%) for %d ms, entering deep sleep",
+                         s_ctx.battery_percent,
+                         s_ctx.low_battery_cutoff_percent,
+                         LOW_BATTERY_CUTOFF_DELAY_MS);
+            } else {
+                ESP_LOGW(TAG, "Battery reached 0%% for %d seconds, entering deep sleep",
+                         s_ctx.battery_shutdown_delay_s);
+            }
+            configure_deep_sleep_wake_gpio();
             vTaskDelay(pdMS_TO_TICKS(100));
             esp_deep_sleep_start();
         }
@@ -1639,6 +1702,7 @@ void prop_engine_get_config_json(char *out, size_t out_size)
              "\"batteryAdcAt0V\":%d,"
              "\"batteryAdcAt15V\":%d,"
              "\"lowBatteryPercent\":%d,"
+             "\"lowBatteryCutoffPercent\":%d,"
              "\"batteryVoltageMv\":%d,"
              "\"heartbeatInterval\":%d,"
              "\"input1Name\":\"%s\","
@@ -1668,6 +1732,7 @@ void prop_engine_get_config_json(char *out, size_t out_size)
              s_ctx.battery_adc_at_0v,
              s_ctx.battery_adc_at_15v,
              s_ctx.low_battery_percent,
+             s_ctx.low_battery_cutoff_percent,
              s_ctx.battery_voltage_mv,
              heartbeat_ms_from_cfg(cfg),
              cfg->input_names[0],
@@ -1709,6 +1774,7 @@ void prop_engine_get_default_config_json(char *out, size_t out_size)
              "\"batteryAdcAt0V\":%d,"
              "\"batteryAdcAt15V\":%d,"
              "\"lowBatteryPercent\":%d,"
+             "\"lowBatteryCutoffPercent\":%d,"
              "\"batteryVoltageMv\":%d,"
              "\"heartbeatInterval\":%d,"
              "\"input1Name\":\"%s\","
@@ -1738,6 +1804,7 @@ void prop_engine_get_default_config_json(char *out, size_t out_size)
              0,
              BATTERY_ADC_MAX_VALUE,
              40,
+             20,
              profile ? profile->points[0].mv - 80 : 6500,
              heartbeat_ms_from_cfg(&defaults),
              defaults.input_names[0],

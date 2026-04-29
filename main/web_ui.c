@@ -111,6 +111,8 @@ static esp_timer_handle_t s_sta_reconnect_timer;
 static esp_timer_handle_t s_ap_shutdown_timer;
 static bool s_ap_shutdown_pending;
 static char s_sta_ip_text[32] = "";
+static int s_sta_last_disconnect_reason;
+static char s_sta_last_error[48] = "";
 
 #define CONN_STORE_NS "web_ui"
 #define CONN_STORE_KEY "conn_cfg_v1"
@@ -121,8 +123,8 @@ typedef struct {
 } connection_store_t;
 
 static connection_cfg_t s_conn_cfg = {
-    .wifi_ssid = "TMOBILE-6338",
-    .wifi_password = "c6ggm7ghs5s",
+    .wifi_ssid = "",
+    .wifi_password = "",
     .mqtt_host = "",
     .mqtt_port = 1883,
     .mqtt_username = "",
@@ -395,6 +397,269 @@ static void copy_bounded_local(char *dst, size_t dst_size, const char *src)
     dst[dst_size - 1] = '\0';
 }
 
+static const char *wifi_authmode_to_str(wifi_auth_mode_t authmode)
+{
+    switch (authmode) {
+        case WIFI_AUTH_OPEN:
+            return "open";
+        case WIFI_AUTH_WEP:
+            return "wep";
+        case WIFI_AUTH_WPA_PSK:
+            return "wpa-psk";
+        case WIFI_AUTH_WPA2_PSK:
+            return "wpa2-psk";
+        case WIFI_AUTH_WPA_WPA2_PSK:
+            return "wpa-wpa2-psk";
+#ifdef WIFI_AUTH_WPA2_ENTERPRISE
+        case WIFI_AUTH_WPA2_ENTERPRISE:
+            return "wpa2-enterprise";
+#endif
+#ifdef WIFI_AUTH_WPA3_PSK
+        case WIFI_AUTH_WPA3_PSK:
+            return "wpa3-psk";
+#endif
+#ifdef WIFI_AUTH_WPA2_WPA3_PSK
+        case WIFI_AUTH_WPA2_WPA3_PSK:
+            return "wpa2-wpa3-psk";
+#endif
+#ifdef WIFI_AUTH_WAPI_PSK
+        case WIFI_AUTH_WAPI_PSK:
+            return "wapi-psk";
+#endif
+#ifdef WIFI_AUTH_OWE
+        case WIFI_AUTH_OWE:
+            return "owe";
+#endif
+        default:
+            return "unknown";
+    }
+}
+
+static const char *wifi_disconnect_reason_to_str(int reason)
+{
+    switch (reason) {
+        case WIFI_REASON_AUTH_EXPIRE:
+            return "auth-expired";
+        case WIFI_REASON_AUTH_LEAVE:
+            return "auth-leave";
+        case WIFI_REASON_ASSOC_TOOMANY:
+            return "assoc-too-many";
+        case WIFI_REASON_ASSOC_LEAVE:
+            return "assoc-leave";
+        case WIFI_REASON_ASSOC_NOT_AUTHED:
+            return "assoc-not-authed";
+        case WIFI_REASON_DISASSOC_PWRCAP_BAD:
+            return "disassoc-power-cap-bad";
+        case WIFI_REASON_DISASSOC_SUPCHAN_BAD:
+            return "disassoc-channel-bad";
+        case WIFI_REASON_IE_INVALID:
+            return "ie-invalid";
+        case WIFI_REASON_MIC_FAILURE:
+            return "mic-failure";
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+            return "4way-timeout";
+        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:
+            return "group-key-timeout";
+        case WIFI_REASON_IE_IN_4WAY_DIFFERS:
+            return "ie-4way-differs";
+        case WIFI_REASON_GROUP_CIPHER_INVALID:
+            return "group-cipher-invalid";
+        case WIFI_REASON_PAIRWISE_CIPHER_INVALID:
+            return "pairwise-cipher-invalid";
+        case WIFI_REASON_AKMP_INVALID:
+            return "akmp-invalid";
+        case WIFI_REASON_UNSUPP_RSN_IE_VERSION:
+            return "rsn-version-unsupported";
+        case WIFI_REASON_INVALID_RSN_IE_CAP:
+            return "rsn-cap-invalid";
+        case WIFI_REASON_802_1X_AUTH_FAILED:
+            return "8021x-auth-failed";
+        case WIFI_REASON_CIPHER_SUITE_REJECTED:
+            return "cipher-suite-rejected";
+        case WIFI_REASON_BEACON_TIMEOUT:
+            return "beacon-timeout";
+        case WIFI_REASON_NO_AP_FOUND:
+            return "no-ap-found";
+        case WIFI_REASON_AUTH_FAIL:
+            return "auth-failed";
+        case WIFI_REASON_ASSOC_FAIL:
+            return "assoc-failed";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return "handshake-timeout";
+#ifdef WIFI_REASON_CONNECTION_FAIL
+        case WIFI_REASON_CONNECTION_FAIL:
+            return "connection-failed";
+#endif
+#ifdef WIFI_REASON_AP_TSF_RESET
+        case WIFI_REASON_AP_TSF_RESET:
+            return "ap-tsf-reset";
+#endif
+        default:
+            return "unknown";
+    }
+}
+
+static bool wifi_authmode_is_enterprise(wifi_auth_mode_t authmode)
+{
+    switch (authmode) {
+#ifdef WIFI_AUTH_WPA2_ENTERPRISE
+        case WIFI_AUTH_WPA2_ENTERPRISE:
+            return true;
+#endif
+#ifdef WIFI_AUTH_WPA3_ENTERPRISE
+        case WIFI_AUTH_WPA3_ENTERPRISE:
+            return true;
+#endif
+#ifdef WIFI_AUTH_WPA2_WPA3_ENTERPRISE
+        case WIFI_AUTH_WPA2_WPA3_ENTERPRISE:
+            return true;
+#endif
+#ifdef WIFI_AUTH_WPA3_ENT_192
+        case WIFI_AUTH_WPA3_ENT_192:
+            return true;
+#endif
+        default:
+            return false;
+    }
+}
+
+static bool wifi_authmode_is_passwordless(wifi_auth_mode_t authmode)
+{
+    switch (authmode) {
+        case WIFI_AUTH_OPEN:
+            return true;
+#ifdef WIFI_AUTH_OWE
+        case WIFI_AUTH_OWE:
+            return true;
+#endif
+        default:
+            return false;
+    }
+}
+
+static bool wifi_lookup_ap_record(const char *ssid, wifi_ap_record_t *out)
+{
+    wifi_scan_config_t scan_cfg = {0};
+    wifi_ap_record_t *records = NULL;
+    uint16_t count = 0;
+    bool found = false;
+    int best_rssi = -127;
+
+    if (!ssid || ssid[0] == '\0' || !out) {
+        return false;
+    }
+
+    if (esp_wifi_scan_start(&scan_cfg, true) != ESP_OK) {
+        return false;
+    }
+    if (esp_wifi_scan_get_ap_num(&count) != ESP_OK || count == 0) {
+        return false;
+    }
+
+    records = (wifi_ap_record_t *)calloc(count, sizeof(*records));
+    if (!records) {
+        return false;
+    }
+
+    if (esp_wifi_scan_get_ap_records(&count, records) == ESP_OK) {
+        for (uint16_t i = 0; i < count; ++i) {
+            if (strcmp((const char *)records[i].ssid, ssid) != 0) {
+                continue;
+            }
+            if (!found || records[i].rssi > best_rssi) {
+                *out = records[i];
+                best_rssi = records[i].rssi;
+                found = true;
+            }
+        }
+    }
+
+    free(records);
+    return found;
+}
+
+static bool validate_wifi_credentials(const char *ssid, const char *password,
+                                      const wifi_ap_record_t *ap_info,
+                                      char *err_buf, size_t err_buf_size)
+{
+    size_t pass_len = password ? strlen(password) : 0;
+
+    if (!ssid || ssid[0] == '\0') {
+        return true;
+    }
+
+    if (pass_len > 64) {
+        snprintf(err_buf, err_buf_size, "WiFi password exceeds the supported 64-character limit.");
+        return false;
+    }
+
+    if (!ap_info) {
+        return true;
+    }
+
+    if (wifi_authmode_is_enterprise(ap_info->authmode)) {
+        snprintf(err_buf,
+                 err_buf_size,
+                 "SSID '%s' uses %s, which this UI does not support.",
+                 ssid,
+                 wifi_authmode_to_str(ap_info->authmode));
+        return false;
+    }
+
+    if (wifi_authmode_is_passwordless(ap_info->authmode)) {
+        if (pass_len > 0) {
+            snprintf(err_buf,
+                     err_buf_size,
+                     "SSID '%s' does not use a WiFi password.",
+                     ssid);
+            return false;
+        }
+        return true;
+    }
+
+    if (pass_len == 0) {
+        snprintf(err_buf,
+                 err_buf_size,
+                 "SSID '%s' requires a WiFi password.",
+                 ssid);
+        return false;
+    }
+
+    if (ap_info->authmode != WIFI_AUTH_WEP && pass_len < 8) {
+        snprintf(err_buf,
+                 err_buf_size,
+                 "SSID '%s' requires an 8-64 character WiFi password.",
+                 ssid);
+        return false;
+    }
+
+    return true;
+}
+
+static wifi_auth_mode_t wifi_select_sta_authmode(const wifi_ap_record_t *ap_info)
+{
+    if (!ap_info) {
+        return WIFI_AUTH_OPEN;
+    }
+
+    switch (ap_info->authmode) {
+#ifdef WIFI_AUTH_WPA2_WPA3_PSK
+        case WIFI_AUTH_WPA2_WPA3_PSK:
+            return WIFI_AUTH_WPA2_WPA3_PSK;
+#endif
+#ifdef WIFI_AUTH_WPA3_PSK
+        case WIFI_AUTH_WPA3_PSK:
+            return WIFI_AUTH_WPA3_PSK;
+#endif
+#ifdef WIFI_AUTH_OWE
+        case WIFI_AUTH_OWE:
+            return WIFI_AUTH_OWE;
+#endif
+        default:
+            return ap_info->authmode;
+    }
+}
+
 static esp_err_t static_asset_handler(httpd_req_t *req)
 {
     const static_asset_t *asset = (const static_asset_t *)req->user_ctx;
@@ -541,17 +806,59 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
 {
     char body[1024];
     char value[128];
+    char new_wifi_ssid[sizeof(s_conn_cfg.wifi_ssid)];
+    char new_wifi_password[sizeof(s_conn_cfg.wifi_password)];
+    bool wifi_ssid_updated = false;
+    bool wifi_password_updated = false;
 
     if (read_request_body(req, body, sizeof(body)) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
         return ESP_FAIL;
     }
 
+    copy_bounded_local(new_wifi_ssid, sizeof(new_wifi_ssid), s_conn_cfg.wifi_ssid);
+    copy_bounded_local(new_wifi_password, sizeof(new_wifi_password), s_conn_cfg.wifi_password);
+
     if (json_extract_string_local(body, "wifiSsid", value, sizeof(value))) {
-        copy_bounded_local(s_conn_cfg.wifi_ssid, sizeof(s_conn_cfg.wifi_ssid), value);
+        copy_bounded_local(new_wifi_ssid, sizeof(new_wifi_ssid), value);
+        wifi_ssid_updated = true;
     }
     if (json_extract_string_local(body, "wifiPassword", value, sizeof(value))) {
-        copy_bounded_local(s_conn_cfg.wifi_password, sizeof(s_conn_cfg.wifi_password), value);
+        copy_bounded_local(new_wifi_password, sizeof(new_wifi_password), value);
+        wifi_password_updated = true;
+    }
+    if (wifi_ssid_updated || wifi_password_updated) {
+        wifi_ap_record_t ap_info;
+        wifi_ap_record_t *ap_info_ptr = NULL;
+        char validation_error[160];
+
+        if (new_wifi_ssid[0] != '\0' && wifi_lookup_ap_record(new_wifi_ssid, &ap_info)) {
+            ap_info_ptr = &ap_info;
+            ESP_LOGI(TAG,
+                     "Selected SSID '%s' auth=%s rssi=%d",
+                     new_wifi_ssid,
+                     wifi_authmode_to_str(ap_info.authmode),
+                     (int)ap_info.rssi);
+        }
+
+        if (!validate_wifi_credentials(new_wifi_ssid,
+                                       new_wifi_password,
+                                       ap_info_ptr,
+                                       validation_error,
+                                       sizeof(validation_error))) {
+            char err_payload[256];
+
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            snprintf(err_payload,
+                     sizeof(err_payload),
+                     "{\"ok\":false,\"applied\":false,\"error\":\"%s\"}",
+                     validation_error);
+            return httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+        }
+
+        copy_bounded_local(s_conn_cfg.wifi_ssid, sizeof(s_conn_cfg.wifi_ssid), new_wifi_ssid);
+        copy_bounded_local(s_conn_cfg.wifi_password, sizeof(s_conn_cfg.wifi_password), new_wifi_password);
     }
     if (json_extract_string_local(body, "mqttHost", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_host, sizeof(s_conn_cfg.mqtt_host), value);
@@ -693,6 +1000,8 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
              "\"wifiTargetSsid\":\"%s\","
              "\"wifiSsid\":\"%s\","
              "\"wifiRssi\":%d,"
+             "\"wifiLastError\":\"%s\","
+             "\"wifiLastErrorCode\":%d,"
              "\"pendingApShutdown\":%s"
              "}",
              s_prop_id,
@@ -711,6 +1020,8 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
              s_conn_cfg.wifi_ssid,
              wifi_ssid_json,
              wifi_rssi,
+             s_sta_last_error,
+             s_sta_last_disconnect_reason,
              s_ap_shutdown_pending ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
@@ -778,10 +1089,11 @@ static esp_err_t connection_scan_get_handler(httpd_req_t *req)
         }
         pos += (size_t)snprintf(payload + pos,
                                 4096 - pos,
-                                "{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":%d}",
+                                "{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":%d,\"authName\":\"%s\"}",
                                 (const char *)records[i].ssid,
                                 (int)records[i].rssi,
-                                (int)records[i].authmode);
+                                (int)records[i].authmode,
+                                wifi_authmode_to_str(records[i].authmode));
         if (pos >= 4000) {
             break;
         }
@@ -873,7 +1185,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
+        int reason = event ? (int)event->reason : 0;
+
         s_sta_ip_text[0] = '\0';
+        s_sta_last_disconnect_reason = reason;
+        copy_bounded_local(s_sta_last_error,
+                           sizeof(s_sta_last_error),
+                           wifi_disconnect_reason_to_str(reason));
 
         /* Cancel pending AP shutdown — we lost the STA link */
         if (s_ap_shutdown_pending) {
@@ -883,7 +1202,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
         s_sta_connecting = (s_conn_cfg.wifi_ssid[0] != '\0');
         s_sta_retry_count++;
-        ESP_LOGW(TAG, "STA disconnected (retry=%d)", s_sta_retry_count);
+        ESP_LOGW(TAG,
+                 "STA disconnected: reason=%d (%s), retry=%d",
+                 reason,
+                 s_sta_last_error,
+                 s_sta_retry_count);
 
         if (s_sta_connecting && s_sta_reconnect_timer) {
             uint32_t delay_ms = get_backoff_ms(s_sta_retry_count - 1);
@@ -899,6 +1222,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_sta_connecting = false;
         s_sta_retry_count = 0;
+        s_sta_last_disconnect_reason = 0;
+        s_sta_last_error[0] = '\0';
         snprintf(s_sta_ip_text, sizeof(s_sta_ip_text), IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "STA connected, IP=%s", s_sta_ip_text);
 
@@ -917,9 +1242,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
 static esp_err_t wifi_connect_sta(const char *ssid, const char *password)
 {
+    wifi_ap_record_t ap_info;
+    wifi_ap_record_t *ap_info_ptr = NULL;
     if (!ssid || ssid[0] == '\0') {
         ESP_LOGW(TAG, "wifi_connect_sta: empty SSID, skipping");
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (wifi_lookup_ap_record(ssid, &ap_info)) {
+        ap_info_ptr = &ap_info;
     }
 
     wifi_config_t sta_cfg = {0};
@@ -927,11 +1258,24 @@ static esp_err_t wifi_connect_sta(const char *ssid, const char *password)
     if (password && password[0] != '\0') {
         strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
     }
+    sta_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    sta_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    sta_cfg.sta.threshold.authmode = wifi_select_sta_authmode(ap_info_ptr);
+    sta_cfg.sta.pmf_cfg.capable = true;
+    sta_cfg.sta.pmf_cfg.required = false;
+#ifdef CONFIG_ESP_WIFI_ENABLE_WPA3_SAE
+    sta_cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+#endif
 
-    ESP_LOGI(TAG, "STA connecting to '%s'", ssid);
+    ESP_LOGI(TAG,
+             "STA connecting to '%s' (auth=%s)",
+             ssid,
+             ap_info_ptr ? wifi_authmode_to_str(ap_info_ptr->authmode) : "unknown");
     s_sta_connecting = true;
     s_sta_retry_count = 0;
     s_sta_ip_text[0] = '\0';
+    s_sta_last_disconnect_reason = 0;
+    s_sta_last_error[0] = '\0';
 
     /* Cancel any pending backoff reconnect */
     if (s_sta_reconnect_timer) {
@@ -1038,6 +1382,7 @@ esp_err_t web_ui_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.max_uri_handlers = 40;
+    config.stack_size = 8192;
 
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &config));

@@ -46,10 +46,22 @@
         const base = getApiBase().replace(/\/$/, "");
         const requestUrl = originBase ? path : (base + path);
         const res = await fetch(requestUrl, options);
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        const rawText = await res.text();
+        let data = null;
+
+        if (rawText) {
+            try {
+                data = JSON.parse(rawText);
+            } catch {
+                data = null;
+            }
         }
-        return res.json();
+
+        if (!res.ok) {
+            const detail = data && data.error ? `: ${data.error}` : (rawText ? `: ${rawText}` : "");
+            throw new Error(`HTTP ${res.status} ${res.statusText}${detail}`);
+        }
+        return data;
     }
 
     async function mockResponse(path, options) {
@@ -742,8 +754,16 @@
                 statusEl.innerHTML = `<span class="wifi-icon">${tablerWifiSvg(1)}</span> Connecting to <strong>${details.wifiTargetSsid}</strong>...`;
                 statusEl.style.color = "var(--warn)";
             } else {
-                statusEl.innerHTML = `Not connected to any network`;
-                statusEl.style.color = "var(--muted)";
+                let html = `Not connected to any network`;
+                if (details && details.wifiLastError) {
+                    html += `<br><span class="hint">Last WiFi error: <strong>${details.wifiLastError}</strong>`;
+                    if (details.wifiLastErrorCode) {
+                        html += ` (${details.wifiLastErrorCode})`;
+                    }
+                    html += `</span>`;
+                }
+                statusEl.innerHTML = html;
+                statusEl.style.color = details && details.wifiLastError ? "var(--danger)" : "var(--muted)";
             }
         }
 
@@ -823,6 +843,10 @@
                 appendLog(log, { connectWifi: { ssid: payload.wifiSsid, apEnabled: payload.apEnabled }, result: result });
                 await loadDeviceDetails();
             } catch (err) {
+                if (statusEl) {
+                    statusEl.textContent = String(err);
+                    statusEl.style.color = "var(--danger)";
+                }
                 appendLog(log, { error: String(err) });
             }
         });

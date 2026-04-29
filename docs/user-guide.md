@@ -71,6 +71,12 @@ In the **Network** section:
 4. **MQTT Port** — Default is 1883 (leave as is)
 5. Click **Save**
 
+Important WiFi notes:
+
+- The PX-WiFi-V1 supports **2.4 GHz WiFi only**. If your venue uses the same SSID on 2.4 GHz and 5 GHz, make sure 2.4 GHz is enabled.
+- Password-free networks are supported, but **enterprise WiFi** networks that require usernames, certificates, captive portals, or 802.1X login are **not** supported from the prop UI.
+- If the connection fails, the Connection page now shows the last WiFi error reported by the ESP32 so you can tell the difference between bad credentials and AP compatibility problems.
+
 The device will reboot and attempt to connect to the venue WiFi. The RGB LED will transition:
 
 - Blue pulse → Connecting to venue WiFi
@@ -116,6 +122,8 @@ The device attempts automatic WiFi connection:
 3. Open `http://192.168.4.1` and enter your venue WiFi details
 4. Device connects to venue WiFi and becomes a WiFi client
 
+If the selected SSID advertises a supported security mode, the prop now uses the scanned network's security settings when joining instead of assuming a generic WPA2 configuration.
+
 ### Manual AP Mode
 
 If you need to reconnect to WiFi:
@@ -148,6 +156,26 @@ Navigate to the **Configuration Page** at `http://<device-ip>/config.html`:
 #### Save
 Click **Save** to store these settings persistently. Settings survive power loss.
 
+### Advanced Manual Config (Not in Web UI)
+
+Some advanced options are only available by editing SPIFFS config directly.
+
+Config file path: `/spiffs/config.json`
+
+- `lowBatteryCutoffPercent` (default: `20`)
+- Range: `0` to `100`
+- Behavior: if battery percentage stays at or below this value for 15 seconds continuously, the device enters deep sleep
+- Set to `0` to disable this feature
+- Wake behavior after low-battery deep sleep: the next state change on the red wire input (GPIO4) wakes the unit. Reset button and power-cycle also wake/restart the unit.
+
+Example:
+
+```json
+{
+  "lowBatteryCutoffPercent": 20
+}
+```
+
 ---
 
 ## Testing & Troubleshooting
@@ -172,7 +200,8 @@ Click **Save** to store these settings persistently. Settings survive power loss
 | Only 1 dot showing | No WiFi or weak signal | Move prop closer to AP. Check WiFi SSID/password in config. |
 | Commands delayed >1 sec | Weak WiFi signal | Reposition prop. Check for RF interference (microwaves, radios). |
 | Can't reach config page | Device not on WiFi yet | Look for `Paradox-px-wifi-v1-XXXX` AP. If not visible, power cycle device. |
-| RGB LED stays blue (pulsing) | WiFi not connecting | Check WiFi SSID and password. Try reconnecting via AP mode. |
+| RGB LED stays blue (pulsing) | WiFi not connecting | Check the Connection page for the last WiFi error. Verify the venue SSID has 2.4 GHz enabled and is not an enterprise/captive-portal network. |
+| Network is visible but connection fails repeatedly | Unsupported AP security mode or AP requires a password the prop did not receive | Re-scan the SSID, confirm the password, and check the reported WiFi error. WPA/WPA2/WPA3 personal networks are supported. Enterprise networks are not. |
 
 ### Power Issues
 
