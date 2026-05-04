@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PX-WiFi-V1 OTA Update</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <main class="wrap layout single" style="padding-top:2rem;">
+        <section class="panel wide">
+            <div class="panel-head">
+                <h2>Firmware Update</h2>
+            </div>
+            <p class="hint">Select a firmware .bin file and upload it directly to the prop. The device reboots automatically after a successful update.</p>
+            <div class="form-grid">
+                <label>Firmware Binary<input id="firmwareFile" type="file" accept=".bin,application/octet-stream"></label>
+            </div>
+            <div class="row-actions" style="margin-top:0.8rem;">
+                <button id="uploadBtn" class="btn">Upload Firmware</button>
+                <a class="btn btn-ghost" href="connection.html">Back to Connect</a>
+            </div>
+            <pre id="otaLog" class="log"></pre>
+        </section>
+    </main>
+
+    <script>
+        (function () {
+            function el(id) { return document.getElementById(id); }
+            function log(msg) {
+                var node = el("otaLog");
+                var ts = new Date().toISOString();
+                node.textContent = "[" + ts + "] " + msg + "\n" + node.textContent;
+            }
+
+            el("uploadBtn").addEventListener("click", async function () {
+                var fileInput = el("firmwareFile");
+                if (!fileInput.files || fileInput.files.length === 0) {
+                    log("Select a firmware .bin file first.");
+                    return;
+                }
+
+                var file = fileInput.files[0];
+                log("Uploading " + file.name + " (" + file.size + " bytes)...");
+
+                try {
+                    var res = await fetch("/api/ota/upload", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/octet-stream"
+                        },
+                        body: file
+                    });
+                    var text = await res.text();
+                    if (!res.ok) {
+                        log("Upload failed: " + text);
+                        return;
+                    }
+                    log("Upload complete: " + text);
+                    log("Device will reboot in a moment.");
+                } catch (err) {
+                    log("Upload error: " + String(err));
+                }
+            });
+        })();
+    </script>
+</body>
+</html>

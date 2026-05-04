@@ -64,6 +64,8 @@ typedef struct {
     int time_remaining_ms;
     uint8_t connected_mask;
     int wire_count;
+    bool ready_show_time;
+    bool stopped;
     char lid_mode[20];
 } prop_runtime_snapshot_t;
 
@@ -87,3 +89,4 @@ esp_err_t prop_engine_restore_defaults(bool persist, char *response, size_t resp
 prop_led_hint_t prop_engine_get_led_hint(void);
 void prop_engine_get_buzzer_mml_config(prop_buzzer_mml_config_t *out);
 void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out);
+bool prop_engine_pop_event_json(char *out, size_t out_size);

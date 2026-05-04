@@ -133,6 +133,11 @@ static bool double_blink_on(int64_t t_ms)
     return (phase < 100) || (phase >= 220 && phase < 320);
 }
 
+static bool blink_1hz_on(int64_t t_ms)
+{
+    return ((t_ms / 500) % 2) == 0;
+}
+
 static rgb_color_t led_color_for_hint(prop_led_hint_t hint, int64_t t_ms)
 {
     const rgb_color_t red = {31, 0, 0};
@@ -446,17 +451,38 @@ static void display_task(void *arg)
         if (lid_forces_blank(snap.lid_mode)) {
             display_render_blank(frame);
         } else if (snap.state == PROP_STATE_READY) {
-            /* In READY state, show WiFi strength indicator and use slower refresh
-             * to allow light sleep to be more effective. */
-            display_render_wifi_strength(frame, now_ms);
-            refresh_ms = 1000;  /* Update once per second */
+            if (snap.ready_show_time) {
+                display_render_mmss(frame, snap.time_remaining_ms / 1000, colon_on_1hz);
+                refresh_ms = 250;
+            } else {
+                /* In READY state, show WiFi strength indicator and use slower refresh
+                 * to allow light sleep to be more effective. */
+                display_render_wifi_strength(frame, now_ms);
+                refresh_ms = 1000;  /* Update once per second */
+            }
         } else if (snap.state == PROP_STATE_NOT_READY) {
-            display_render_dashes(frame);
-            display_apply_progress_bars(frame, snap.connected_mask, snap.wire_count);
+            if (snap.ready_show_time) {
+                display_render_mmss(frame, snap.time_remaining_ms / 1000, colon_on_1hz);
+                display_apply_progress_bars(frame, snap.connected_mask, snap.wire_count);
+                refresh_ms = 250;
+            } else {
+                display_render_dashes(frame);
+                display_apply_progress_bars(frame, snap.connected_mask, snap.wire_count);
+            }
         } else if (snap.state == PROP_STATE_COUNTDOWN || snap.state == PROP_STATE_PAUSED) {
-            display_render_mmss(frame, snap.time_remaining_ms / 1000, colon_on_1hz);
-        } else if (snap.state == PROP_STATE_DEFUSED || snap.state == PROP_STATE_DETONATED) {
+            if (snap.stopped && !blink_1hz_on(now_ms)) {
+                display_render_blank(frame);
+            } else {
+                display_render_mmss(frame, snap.time_remaining_ms / 1000, colon_on_1hz);
+            }
+        } else if (snap.state == PROP_STATE_DEFUSED) {
             if ((now_ms - result_enter_ms) <= 120000) {
+                display_render_mmss(frame, frozen_result_seconds, true);
+            } else {
+                display_render_blank(frame);
+            }
+        } else if (snap.state == PROP_STATE_DETONATED) {
+            if (blink_1hz_on(now_ms)) {
                 display_render_mmss(frame, frozen_result_seconds, true);
             } else {
                 display_render_blank(frame);
@@ -858,6 +884,9 @@ static void buzzer_task(void *arg)
                 buzzer_play_mml(buzzer_cfg.solved);
             } else if (hint == PROP_LED_HINT_DETONATED) {
                 buzzer_play_mml(buzzer_cfg.failed);
+            } else if (prev_hint == PROP_LED_HINT_PENALTY && hint != PROP_LED_HINT_PENALTY) {
+                s_player.active = false;
+                buzzer_set(false, 0, 0);
             } else if (hint_is_result(prev_hint) && !hint_is_result(hint)) {
                 /* Leaving a result state — silence anything still playing */
                 s_player.active = false;

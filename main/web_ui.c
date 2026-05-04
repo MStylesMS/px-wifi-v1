@@ -5,22 +5,35 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include "esp_event.h"
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include "mqtt_client.h"
 #include "mdns.h"
-#include "nvs.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "web_ui";
 
 static esp_err_t wifi_connect_sta(const char *ssid, const char *password);
+static bool json_extract_string_local(const char *json, const char *key, char *out, size_t out_size);
+static bool json_extract_int_local(const char *json, const char *key, int *out);
+static bool json_extract_bool_local(const char *json, const char *key, bool *out);
+static void copy_bounded_local(char *dst, size_t dst_size, const char *src);
+static esp_err_t save_connection_cfg_nvs(void);
+static void mqtt_start_client(void);
+static void mqtt_stop_client(void);
+static void ota_reboot_task(void *arg);
 
 typedef struct {
     const uint8_t *start;
@@ -39,6 +52,8 @@ extern const uint8_t styles_css_start[] asm("_binary_styles_css_start");
 extern const uint8_t styles_css_end[] asm("_binary_styles_css_end");
 extern const uint8_t app_js_start[] asm("_binary_app_js_start");
 extern const uint8_t app_js_end[] asm("_binary_app_js_end");
+extern const uint8_t update_html_start[] asm("_binary_update_html_start");
+extern const uint8_t update_html_end[] asm("_binary_update_html_end");
 extern const uint8_t logo_png_start[] asm("_binary_logo_png_start");
 extern const uint8_t logo_png_end[] asm("_binary_logo_png_end");
 
@@ -77,6 +92,13 @@ static const static_asset_t ASSET_APP_JS = {
     .cache_control = "no-store",
 };
 
+static const static_asset_t ASSET_UPDATE = {
+    .start = update_html_start,
+    .end = update_html_end,
+    .content_type = "text/html; charset=utf-8",
+    .cache_control = "no-store",
+};
+
 static const static_asset_t ASSET_LOGO = {
     .start = logo_png_start,
     .end = logo_png_end,
@@ -92,12 +114,8 @@ typedef struct {
     char mqtt_username[64];
     char mqtt_password[64];
     char mqtt_base_topic[96];
-    char mqtt_commands_topic[128];
-    char mqtt_state_topic[128];
-    char mqtt_events_topic[128];
-    char mqtt_warnings_topic[128];
     char mqtt_game_state_topic[128];
-    char mqtt_prop_state_topic[128];
+    char mqtt_prop_announce_topic[128];
     char network_name[33];
     char ap_password[65];
     bool ap_enabled;
@@ -110,17 +128,14 @@ static int s_sta_retry_count;
 static esp_timer_handle_t s_sta_reconnect_timer;
 static esp_timer_handle_t s_ap_shutdown_timer;
 static bool s_ap_shutdown_pending;
+static esp_mqtt_client_handle_t s_mqtt_client;
+static bool s_mqtt_connected;
+static char s_mqtt_uri[196] = "";
 static char s_sta_ip_text[32] = "";
 static int s_sta_last_disconnect_reason;
 static char s_sta_last_error[48] = "";
 
-#define CONN_STORE_NS "web_ui"
-#define CONN_STORE_KEY "conn_cfg_v1"
-
-typedef struct {
-    uint32_t version;
-    connection_cfg_t cfg;
-} connection_store_t;
+#define CONFIG_FILE_PATH "/spiffs/config.json"
 
 static connection_cfg_t s_conn_cfg = {
     .wifi_ssid = "",
@@ -129,13 +144,9 @@ static connection_cfg_t s_conn_cfg = {
     .mqtt_port = 1883,
     .mqtt_username = "",
     .mqtt_password = "",
-    .mqtt_base_topic = "paradox",
-    .mqtt_commands_topic = "paradox/site/zone/commands",
-    .mqtt_state_topic = "paradox/site/zone/state",
-    .mqtt_events_topic = "paradox/site/zone/events",
-    .mqtt_warnings_topic = "paradox/site/zone/warnings",
-    .mqtt_game_state_topic = "paradox/game/state",
-    .mqtt_prop_state_topic = "paradox/state",
+    .mqtt_base_topic = "site/room/zone",
+    .mqtt_game_state_topic = "site/room/state",
+    .mqtt_prop_announce_topic = "site/props",
     .network_name = "",
     .ap_password = "",
     .ap_enabled = true,
@@ -143,66 +154,152 @@ static connection_cfg_t s_conn_cfg = {
 
 static esp_err_t load_connection_cfg_nvs(void)
 {
-    nvs_handle_t nvs = 0;
-    size_t req_size = sizeof(connection_store_t);
-    connection_store_t stored;
+    FILE *f = fopen(CONFIG_FILE_PATH, "r");
+    long size;
+    char *buf;
+    char value[128];
+    int i_val;
+    bool b_val;
 
-    esp_err_t err = nvs_open(CONN_STORE_NS, NVS_READONLY, &nvs);
-    if (err != ESP_OK) {
-        return err;
+    if (!f) {
+        return ESP_ERR_NOT_FOUND;
     }
 
-    err = nvs_get_blob(nvs, CONN_STORE_KEY, &stored, &req_size);
-    nvs_close(nvs);
-    if (err != ESP_OK) {
-        return err;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return ESP_FAIL;
     }
-    if (req_size != sizeof(connection_store_t) || stored.version != 1) {
-        return ESP_ERR_INVALID_VERSION;
+    size = ftell(f);
+    if (size <= 0 || size > 8192) {
+        fclose(f);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    rewind(f);
+
+    buf = (char *)calloc(1, (size_t)size + 1);
+    if (!buf) {
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+    if (fread(buf, 1, (size_t)size, f) != (size_t)size) {
+        free(buf);
+        fclose(f);
+        return ESP_FAIL;
+    }
+    fclose(f);
+
+    if (json_extract_string_local(buf, "wifiSsid", value, sizeof(value))) {
+        strncpy(s_conn_cfg.wifi_ssid, value, sizeof(s_conn_cfg.wifi_ssid) - 1);
+        s_conn_cfg.wifi_ssid[sizeof(s_conn_cfg.wifi_ssid) - 1] = '\0';
+    }
+    if (json_extract_string_local(buf, "wifiPassword", value, sizeof(value))) {
+        strncpy(s_conn_cfg.wifi_password, value, sizeof(s_conn_cfg.wifi_password) - 1);
+        s_conn_cfg.wifi_password[sizeof(s_conn_cfg.wifi_password) - 1] = '\0';
+    }
+    if (json_extract_string_local(buf, "mqttHost", value, sizeof(value))) {
+        strncpy(s_conn_cfg.mqtt_host, value, sizeof(s_conn_cfg.mqtt_host) - 1);
+        s_conn_cfg.mqtt_host[sizeof(s_conn_cfg.mqtt_host) - 1] = '\0';
+    }
+    if (json_extract_int_local(buf, "mqttPort", &i_val) && i_val >= 1 && i_val <= 65535) {
+        s_conn_cfg.mqtt_port = i_val;
+    }
+    if (json_extract_string_local(buf, "mqttUsername", value, sizeof(value))) {
+        strncpy(s_conn_cfg.mqtt_username, value, sizeof(s_conn_cfg.mqtt_username) - 1);
+        s_conn_cfg.mqtt_username[sizeof(s_conn_cfg.mqtt_username) - 1] = '\0';
+    }
+    if (json_extract_string_local(buf, "mqttPassword", value, sizeof(value))) {
+        strncpy(s_conn_cfg.mqtt_password, value, sizeof(s_conn_cfg.mqtt_password) - 1);
+        s_conn_cfg.mqtt_password[sizeof(s_conn_cfg.mqtt_password) - 1] = '\0';
+    }
+    if (json_extract_string_local(buf, "mqttBaseTopic", value, sizeof(value))) {
+        strncpy(s_conn_cfg.mqtt_base_topic, value, sizeof(s_conn_cfg.mqtt_base_topic) - 1);
+        s_conn_cfg.mqtt_base_topic[sizeof(s_conn_cfg.mqtt_base_topic) - 1] = '\0';
+    }
+    if (json_extract_string_local(buf, "mqttGameStateTopic", value, sizeof(value))) {
+        strncpy(s_conn_cfg.mqtt_game_state_topic, value, sizeof(s_conn_cfg.mqtt_game_state_topic) - 1);
+        s_conn_cfg.mqtt_game_state_topic[sizeof(s_conn_cfg.mqtt_game_state_topic) - 1] = '\0';
+    }
+    if (json_extract_string_local(buf, "mqttPropAnnounceTopic", value, sizeof(value)) ||
+        json_extract_string_local(buf, "mqttPropStateTopic", value, sizeof(value))) {
+        strncpy(s_conn_cfg.mqtt_prop_announce_topic, value, sizeof(s_conn_cfg.mqtt_prop_announce_topic) - 1);
+        s_conn_cfg.mqtt_prop_announce_topic[sizeof(s_conn_cfg.mqtt_prop_announce_topic) - 1] = '\0';
+    }
+    if (json_extract_string_local(buf, "networkName", value, sizeof(value))) {
+        strncpy(s_conn_cfg.network_name, value, sizeof(s_conn_cfg.network_name) - 1);
+        s_conn_cfg.network_name[sizeof(s_conn_cfg.network_name) - 1] = '\0';
+    }
+    if (json_extract_string_local(buf, "apPassword", value, sizeof(value))) {
+        strncpy(s_conn_cfg.ap_password, value, sizeof(s_conn_cfg.ap_password) - 1);
+        s_conn_cfg.ap_password[sizeof(s_conn_cfg.ap_password) - 1] = '\0';
+    }
+    if (json_extract_bool_local(buf, "apEnabled", &b_val)) {
+        s_conn_cfg.ap_enabled = b_val;
     }
 
-    s_conn_cfg = stored.cfg;
-    s_conn_cfg.wifi_ssid[sizeof(s_conn_cfg.wifi_ssid) - 1] = '\0';
-    s_conn_cfg.wifi_password[sizeof(s_conn_cfg.wifi_password) - 1] = '\0';
-    s_conn_cfg.mqtt_host[sizeof(s_conn_cfg.mqtt_host) - 1] = '\0';
-    s_conn_cfg.mqtt_username[sizeof(s_conn_cfg.mqtt_username) - 1] = '\0';
-    s_conn_cfg.mqtt_password[sizeof(s_conn_cfg.mqtt_password) - 1] = '\0';
-    s_conn_cfg.mqtt_base_topic[sizeof(s_conn_cfg.mqtt_base_topic) - 1] = '\0';
-    s_conn_cfg.mqtt_commands_topic[sizeof(s_conn_cfg.mqtt_commands_topic) - 1] = '\0';
-    s_conn_cfg.mqtt_state_topic[sizeof(s_conn_cfg.mqtt_state_topic) - 1] = '\0';
-    s_conn_cfg.mqtt_events_topic[sizeof(s_conn_cfg.mqtt_events_topic) - 1] = '\0';
-    s_conn_cfg.mqtt_warnings_topic[sizeof(s_conn_cfg.mqtt_warnings_topic) - 1] = '\0';
-    s_conn_cfg.mqtt_game_state_topic[sizeof(s_conn_cfg.mqtt_game_state_topic) - 1] = '\0';
-    s_conn_cfg.mqtt_prop_state_topic[sizeof(s_conn_cfg.mqtt_prop_state_topic) - 1] = '\0';
-    s_conn_cfg.network_name[sizeof(s_conn_cfg.network_name) - 1] = '\0';
-    s_conn_cfg.ap_password[sizeof(s_conn_cfg.ap_password) - 1] = '\0';
-    if (s_conn_cfg.mqtt_port < 1 || s_conn_cfg.mqtt_port > 65535) {
-        s_conn_cfg.mqtt_port = 1883;
-    }
-
+    free(buf);
     return ESP_OK;
 }
 
 static esp_err_t save_connection_cfg_nvs(void)
 {
-    nvs_handle_t nvs = 0;
-    connection_store_t stored = {
-        .version = 1,
-        .cfg = s_conn_cfg,
-    };
+    char *prop_cfg = NULL;
+    const char *obj_start;
+    const char *obj_end;
+    FILE *f;
 
-    esp_err_t err = nvs_open(CONN_STORE_NS, NVS_READWRITE, &nvs);
-    if (err != ESP_OK) {
-        return err;
+    prop_cfg = (char *)calloc(1, 4096);
+    if (!prop_cfg) {
+        return ESP_ERR_NO_MEM;
     }
 
-    err = nvs_set_blob(nvs, CONN_STORE_KEY, &stored, sizeof(stored));
-    if (err == ESP_OK) {
-        err = nvs_commit(nvs);
+    prop_engine_get_config_json(prop_cfg, 4096);
+    obj_start = strchr(prop_cfg, '{');
+    obj_end = strrchr(prop_cfg, '}');
+    if (!obj_start || !obj_end || obj_end <= obj_start) {
+        free(prop_cfg);
+        return ESP_FAIL;
     }
 
-    nvs_close(nvs);
-    return err;
+    f = fopen(CONFIG_FILE_PATH, "w");
+    if (!f) {
+        free(prop_cfg);
+        return ESP_FAIL;
+    }
+
+    fprintf(f,
+            "{\n"
+            "  \"wifiSsid\": \"%s\",\n"
+            "  \"wifiPassword\": \"%s\",\n"
+            "  \"mqttHost\": \"%s\",\n"
+            "  \"mqttPort\": %d,\n"
+            "  \"mqttUsername\": \"%s\",\n"
+            "  \"mqttPassword\": \"%s\",\n"
+            "  \"mqttBaseTopic\": \"%s\",\n"
+            "  \"mqttGameStateTopic\": \"%s\",\n"
+            "  \"mqttPropAnnounceTopic\": \"%s\",\n"
+            "  \"networkName\": \"%s\",\n"
+            "  \"apPassword\": \"%s\",\n"
+            "  \"apEnabled\": %s,\n"
+            "  %.*s\n"
+            "}\n",
+            s_conn_cfg.wifi_ssid,
+            s_conn_cfg.wifi_password,
+            s_conn_cfg.mqtt_host,
+            s_conn_cfg.mqtt_port,
+            s_conn_cfg.mqtt_username,
+            s_conn_cfg.mqtt_password,
+            s_conn_cfg.mqtt_base_topic,
+            s_conn_cfg.mqtt_game_state_topic,
+            s_conn_cfg.mqtt_prop_announce_topic,
+            s_conn_cfg.network_name,
+            s_conn_cfg.ap_password,
+            s_conn_cfg.ap_enabled ? "true" : "false",
+            (int)(obj_end - obj_start - 1),
+            obj_start + 1);
+
+    fclose(f);
+    free(prop_cfg);
+    return ESP_OK;
 }
 
 static void sanitize_network_name(const char *src, char *out, size_t out_size)
@@ -252,6 +349,8 @@ static void build_default_identity(void)
 static esp_err_t apply_mdns_hostname(void)
 {
     char host[33] = {0};
+    esp_netif_t *ap_netif;
+    esp_netif_t *sta_netif;
 
     sanitize_network_name(s_conn_cfg.network_name, host, sizeof(host));
     strncpy(s_conn_cfg.network_name, host, sizeof(s_conn_cfg.network_name) - 1);
@@ -265,6 +364,15 @@ static esp_err_t apply_mdns_hostname(void)
         }
         s_mdns_started = true;
         mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    }
+
+    ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (ap_netif) {
+        (void)esp_netif_set_hostname(ap_netif, host);
+    }
+    if (sta_netif) {
+        (void)esp_netif_set_hostname(sta_netif, host);
     }
 
     mdns_hostname_set(host);
@@ -395,6 +503,496 @@ static void copy_bounded_local(char *dst, size_t dst_size, const char *src)
 
     strncpy(dst, src, dst_size - 1);
     dst[dst_size - 1] = '\0';
+}
+
+static const char *mqtt_base_topic_or_default(void)
+{
+    return s_conn_cfg.mqtt_base_topic[0] != '\0' ? s_conn_cfg.mqtt_base_topic : "site/room/zone";
+}
+
+static void mqtt_build_topic(char *out, size_t out_size, const char *suffix)
+{
+    snprintf(out, out_size, "%s/%s", mqtt_base_topic_or_default(), suffix);
+}
+
+static int mqtt_state_interval_ms(void)
+{
+    char cfg[1024];
+    int heartbeat = 10000;
+
+    prop_engine_get_config_json(cfg, sizeof(cfg));
+    if (json_extract_int_local(cfg, "heartbeatInterval", &heartbeat)) {
+        if (heartbeat < 1000) {
+            heartbeat = 1000;
+        }
+        if (heartbeat > 120000) {
+            heartbeat = 120000;
+        }
+    }
+    return heartbeat;
+}
+
+static void mqtt_publish_state(bool retained)
+{
+    char state_json[1024];
+    char topic[160];
+
+    if (!s_mqtt_client || !s_mqtt_connected) {
+        return;
+    }
+
+    mqtt_build_topic(topic, sizeof(topic), "state");
+    prop_engine_get_state_json(state_json, sizeof(state_json));
+    esp_mqtt_client_publish(s_mqtt_client,
+                            topic,
+                            state_json,
+                            0,
+                            1,
+                            retained ? 1 : 0);
+}
+
+static bool mqtt_publish_engine_events(bool publish_state_after)
+{
+    char event_json[384];
+    char topic[160];
+    bool had_events = false;
+
+    if (!s_mqtt_client || !s_mqtt_connected) {
+        return false;
+    }
+
+    mqtt_build_topic(topic, sizeof(topic), "events");
+    while (prop_engine_pop_event_json(event_json, sizeof(event_json))) {
+        esp_mqtt_client_publish(s_mqtt_client, topic, event_json, 0, 1, 0);
+        had_events = true;
+    }
+
+    if (had_events && publish_state_after) {
+        mqtt_publish_state(true);
+    }
+
+    return had_events;
+}
+
+static void mqtt_publish_announce(void)
+{
+    char announce[768];
+    char state_topic[160];
+    char commands_topic[160];
+    char host[33] = {0};
+    char ip_text[32] = "unavailable";
+    esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    const esp_app_desc_t *app = esp_app_get_description();
+
+    if (!s_mqtt_client || !s_mqtt_connected || s_conn_cfg.mqtt_prop_announce_topic[0] == '\0') {
+        return;
+    }
+
+    if (sta_netif) {
+        esp_netif_ip_info_t sta_ip;
+        if (esp_netif_get_ip_info(sta_netif, &sta_ip) == ESP_OK) {
+            snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&sta_ip.ip));
+        }
+    }
+
+    mqtt_build_topic(state_topic, sizeof(state_topic), "state");
+    mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
+
+    sanitize_network_name(s_conn_cfg.network_name, host, sizeof(host));
+    snprintf(announce,
+             sizeof(announce),
+             "{"
+             "\"ts\":%lld,"
+             "\"event\":\"online\","
+             "\"propId\":\"%s\","
+             "\"propName\":\"%s\","
+             "\"ip\":\"%s\","
+             "\"mdns\":\"%s.local\","
+             "\"version\":\"%s\","
+             "\"buildDate\":\"%s\","
+             "\"buildTime\":\"%s\","
+             "\"stateTopic\":\"%s\","
+             "\"commandsTopic\":\"%s\""
+             "}",
+             (long long)(esp_timer_get_time() / 1000),
+             s_prop_id,
+             s_prop_id,
+             ip_text,
+             host,
+             app->version,
+             app->date,
+             app->time,
+             state_topic,
+             commands_topic);
+
+    esp_mqtt_client_publish(s_mqtt_client,
+                            s_conn_cfg.mqtt_prop_announce_topic,
+                            announce,
+                            0,
+                            1,
+                            0);
+}
+
+static void mqtt_publish_warning(const char *message)
+{
+    char payload[384];
+    char topic[160];
+
+    if (!s_mqtt_client || !s_mqtt_connected) {
+        return;
+    }
+
+    mqtt_build_topic(topic, sizeof(topic), "warnings");
+
+    snprintf(payload,
+             sizeof(payload),
+             "{\"ts\":%lld,\"warning\":\"%s\"}",
+             (long long)(esp_timer_get_time() / 1000),
+             message ? message : "unknown");
+    esp_mqtt_client_publish(s_mqtt_client, topic, payload, 0, 1, 0);
+}
+
+static bool mqtt_get_follow_cfg(bool *enabled, int *tolerance_ms)
+{
+    char cfg[1024];
+    bool keep_sync = false;
+    int tol = 1000;
+
+    prop_engine_get_config_json(cfg, sizeof(cfg));
+    if (!json_extract_bool_local(cfg, "keepSyncEnabled", &keep_sync)) {
+        keep_sync = false;
+    }
+    if (json_extract_int_local(cfg, "timeToleranceMs", &tol)) {
+        if (tol < 0) {
+            tol = 0;
+        }
+        if (tol > 10000) {
+            tol = 10000;
+        }
+    }
+
+    if (enabled) {
+        *enabled = keep_sync;
+    }
+    if (tolerance_ms) {
+        *tolerance_ms = tol;
+    }
+    return true;
+}
+
+static int parse_time_string_to_seconds(const char *text)
+{
+    int mm;
+    int ss;
+
+    if (!text || text[0] == '\0') {
+        return -1;
+    }
+
+    if (sscanf(text, "%d:%d", &mm, &ss) == 2) {
+        if (mm < 0 || ss < 0) {
+            return -1;
+        }
+        return (mm * 60) + ss;
+    }
+
+    return (int)strtol(text, NULL, 10);
+}
+
+static void mqtt_publish_follow_event(const char *event,
+                                      int before_s,
+                                      int after_s,
+                                      const char *message)
+{
+    char payload[384];
+    char topic[160];
+
+    if (!s_mqtt_client || !s_mqtt_connected) {
+        return;
+    }
+
+    mqtt_build_topic(topic, sizeof(topic), "events");
+
+    snprintf(payload,
+             sizeof(payload),
+             "{"
+             "\"ts\":%lld,"
+             "\"event\":\"%s\","
+             "\"before\":%d,"
+             "\"after\":%d,"
+             "\"message\":\"%s\""
+             "}",
+             (long long)(esp_timer_get_time() / 1000),
+             event ? event : "followEvent",
+             before_s,
+             after_s,
+             message ? message : "");
+    esp_mqtt_client_publish(s_mqtt_client, topic, payload, 0, 1, 0);
+}
+
+static void mqtt_apply_follower_payload(const char *payload, int payload_len)
+{
+    char msg[768];
+    char local_state_json[1024];
+    char local_state[32] = "";
+    char game_mode[32] = "";
+    char game_state[32] = "";
+    char remaining_text[16] = "";
+    char cmd[160];
+    char response[512];
+    bool enabled = false;
+    bool game_paused = false;
+    bool has_pause = false;
+    int tolerance_ms = 1000;
+    int local_remaining_s = -1;
+    int remote_remaining_s = -1;
+
+    if (!payload || payload_len <= 0) {
+        return;
+    }
+
+    mqtt_get_follow_cfg(&enabled, &tolerance_ms);
+    if (!enabled) {
+        return;
+    }
+
+    if (payload_len >= (int)sizeof(msg)) {
+        payload_len = (int)sizeof(msg) - 1;
+    }
+    memcpy(msg, payload, (size_t)payload_len);
+    msg[payload_len] = '\0';
+
+    if (!json_extract_int_local(msg, "timeRemaining", &remote_remaining_s)) {
+        if (json_extract_string_local(msg, "remaining_time", remaining_text, sizeof(remaining_text))) {
+            remote_remaining_s = parse_time_string_to_seconds(remaining_text);
+        }
+    }
+    if (remote_remaining_s < 0) {
+        return;
+    }
+
+    (void)json_extract_bool_local(msg, "gamePaused", &game_paused);
+    has_pause = strstr(msg, "\"gamePaused\"") != NULL;
+    (void)json_extract_string_local(msg, "gameMode", game_mode, sizeof(game_mode));
+    (void)json_extract_string_local(msg, "state", game_state, sizeof(game_state));
+
+    prop_engine_get_state_json(local_state_json, sizeof(local_state_json));
+    (void)json_extract_int_local(local_state_json, "timeRemaining", &local_remaining_s);
+    (void)json_extract_string_local(local_state_json, "gameState", local_state, sizeof(local_state));
+
+    if (local_remaining_s >= 0 &&
+        abs((local_remaining_s - remote_remaining_s) * 1000) > tolerance_ms) {
+        snprintf(cmd, sizeof(cmd), "{\"command\":\"setTime\",\"time\":%d}", remote_remaining_s);
+        if (prop_engine_handle_command_json(cmd, response, sizeof(response)) == ESP_OK) {
+            mqtt_publish_follow_event("syncAdjusted",
+                                      local_remaining_s,
+                                      remote_remaining_s,
+                                      "Follower adjusted local timer");
+        }
+    }
+
+    if (has_pause && game_paused) {
+        if (strcmp(local_state, "countdown") == 0) {
+            if (prop_engine_handle_command_json("{\"command\":\"pause\"}", response, sizeof(response)) == ESP_OK) {
+                mqtt_publish_follow_event("commandOverridden",
+                                          local_remaining_s,
+                                          remote_remaining_s,
+                                          "Follower paused to match game state");
+            }
+        }
+    } else if ((strcmp(game_mode, "running") == 0 || strcmp(game_state, "running") == 0 ||
+                strcmp(game_state, "countdown") == 0) &&
+               (strcmp(local_state, "paused") == 0 || strcmp(local_state, "ready") == 0)) {
+        if (prop_engine_handle_command_json("{\"command\":\"resume\"}", response, sizeof(response)) == ESP_OK) {
+            mqtt_publish_follow_event("commandOverridden",
+                                      local_remaining_s,
+                                      remote_remaining_s,
+                                      "Follower resumed to match game state");
+        }
+    }
+
+    mqtt_publish_state(true);
+}
+
+static void mqtt_handle_command_payload(const char *payload, int payload_len)
+{
+    char cmd_json[512];
+    char response[1024];
+    char command_name[32] = "";
+    char warning_message[96] = "";
+    bool ok = true;
+    bool has_error_message = false;
+    bool has_warning_message = false;
+    char events_topic[160];
+    int copy_len;
+
+    if (!payload || payload_len <= 0) {
+        return;
+    }
+
+    copy_len = payload_len;
+    if (copy_len >= (int)sizeof(cmd_json)) {
+        copy_len = (int)sizeof(cmd_json) - 1;
+    }
+    memcpy(cmd_json, payload, (size_t)copy_len);
+    cmd_json[copy_len] = '\0';
+    (void)json_extract_string_local(cmd_json, "command", command_name, sizeof(command_name));
+
+    if (prop_engine_handle_command_json(cmd_json, response, sizeof(response)) == ESP_OK) {
+        mqtt_build_topic(events_topic, sizeof(events_topic), "events");
+        esp_mqtt_client_publish(s_mqtt_client, events_topic, response, 0, 1, 0);
+        has_warning_message = json_extract_string_local(response, "message", warning_message, sizeof(warning_message));
+        if (!has_warning_message) {
+            has_error_message = json_extract_string_local(response, "error", warning_message, sizeof(warning_message));
+        }
+        if ((json_extract_bool_local(response, "ok", &ok) && !ok) || has_error_message || has_warning_message) {
+            if (!warning_message[0]) {
+                snprintf(warning_message, sizeof(warning_message), "command_rejected");
+            }
+            mqtt_publish_warning(warning_message);
+        }
+        if (!mqtt_publish_engine_events(true)) {
+            mqtt_publish_state(true);
+        }
+        if (strcmp(command_name, "reboot") == 0 && (!json_extract_bool_local(response, "ok", &ok) || ok)) {
+            xTaskCreate(ota_reboot_task, "cmd_reboot", 2048, NULL, 5, NULL);
+        }
+        return;
+    }
+
+    mqtt_publish_warning("command_handle_failed");
+}
+
+static void mqtt_event_handler(void *handler_args,
+                               esp_event_base_t base,
+                               int32_t event_id,
+                               void *event_data)
+{
+    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
+
+    (void)handler_args;
+    (void)base;
+
+    switch ((esp_mqtt_event_id_t)event_id) {
+        case MQTT_EVENT_CONNECTED:
+            {
+                bool follow_enabled = false;
+                int unused_tol = 0;
+                char commands_topic[160];
+
+            s_mqtt_connected = true;
+            ESP_LOGI(TAG, "MQTT connected");
+                mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
+                esp_mqtt_client_subscribe(s_mqtt_client, commands_topic, 1);
+                mqtt_get_follow_cfg(&follow_enabled, &unused_tol);
+                if (follow_enabled && s_conn_cfg.mqtt_game_state_topic[0] != '\0') {
+                    esp_mqtt_client_subscribe(s_mqtt_client, s_conn_cfg.mqtt_game_state_topic, 1);
+                }
+            mqtt_publish_announce();
+            mqtt_publish_state(true);
+            }
+            break;
+        case MQTT_EVENT_DISCONNECTED:
+            s_mqtt_connected = false;
+            ESP_LOGW(TAG, "MQTT disconnected");
+            break;
+        case MQTT_EVENT_DATA: {
+            if (event->topic && event->data) {
+                char commands_topic[160];
+                mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
+                if (event->topic_len == (int)strlen(commands_topic) &&
+                    strncmp(event->topic, commands_topic, (size_t)event->topic_len) == 0) {
+                    mqtt_handle_command_payload(event->data, event->data_len);
+                } else if (s_conn_cfg.mqtt_game_state_topic[0] != '\0' &&
+                           event->topic_len == (int)strlen(s_conn_cfg.mqtt_game_state_topic) &&
+                           strncmp(event->topic, s_conn_cfg.mqtt_game_state_topic, (size_t)event->topic_len) == 0) {
+                    mqtt_apply_follower_payload(event->data, event->data_len);
+                }
+            }
+            break;
+        }
+        case MQTT_EVENT_ERROR:
+            ESP_LOGW(TAG, "MQTT error event");
+            break;
+        default:
+            break;
+    }
+}
+
+static void mqtt_stop_client(void)
+{
+    if (!s_mqtt_client) {
+        return;
+    }
+
+    esp_mqtt_client_stop(s_mqtt_client);
+    esp_mqtt_client_destroy(s_mqtt_client);
+    s_mqtt_client = NULL;
+    s_mqtt_connected = false;
+}
+
+static void mqtt_start_client(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg = {0};
+
+    mqtt_stop_client();
+
+    if (s_conn_cfg.mqtt_host[0] == '\0') {
+        ESP_LOGI(TAG, "MQTT host empty; MQTT client not started");
+        return;
+    }
+
+    snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "mqtt://%s:%d", s_conn_cfg.mqtt_host, s_conn_cfg.mqtt_port);
+    mqtt_cfg.broker.address.uri = s_mqtt_uri;
+    mqtt_cfg.credentials.client_id = s_prop_id;
+    mqtt_cfg.session.keepalive = 60;
+    mqtt_cfg.session.disable_clean_session = true;
+    mqtt_cfg.network.reconnect_timeout_ms = 5000;
+    if (s_conn_cfg.mqtt_username[0] != '\0') {
+        mqtt_cfg.credentials.username = s_conn_cfg.mqtt_username;
+    }
+    if (s_conn_cfg.mqtt_password[0] != '\0') {
+        mqtt_cfg.credentials.authentication.password = s_conn_cfg.mqtt_password;
+    }
+
+    s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+    if (!s_mqtt_client) {
+        ESP_LOGE(TAG, "Failed to init MQTT client");
+        return;
+    }
+
+    esp_mqtt_client_register_event(s_mqtt_client,
+                                   MQTT_EVENT_ANY,
+                                   mqtt_event_handler,
+                                   NULL);
+    esp_mqtt_client_start(s_mqtt_client);
+}
+
+static void mqtt_state_task(void *arg)
+{
+    int64_t last_state_pub_ms = 0;
+    bool was_connected = false;
+
+    (void)arg;
+
+    while (true) {
+        int interval_ms = mqtt_state_interval_ms();
+        int64_t now = esp_timer_get_time() / 1000;
+
+        (void)mqtt_publish_engine_events(true);
+
+        if (!s_mqtt_connected) {
+            was_connected = false;
+        } else if (!was_connected) {
+            last_state_pub_ms = now;
+            was_connected = true;
+        } else if ((now - last_state_pub_ms) >= interval_ms) {
+            mqtt_publish_state(true);
+            last_state_pub_ms = now;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
 }
 
 static const char *wifi_authmode_to_str(wifi_auth_mode_t authmode)
@@ -689,12 +1287,96 @@ static esp_err_t state_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
 }
 
+static void build_unified_config_json(char *out, size_t out_size)
+{
+    char *prop_payload = NULL;
+    char commands_topic[160];
+    char state_topic[160];
+    char events_topic[160];
+    char warnings_topic[160];
+    const char *obj_start;
+    const char *obj_end;
+
+    prop_payload = (char *)calloc(1, 4096);
+    if (!prop_payload) {
+        snprintf(out, out_size, "{}");
+        return;
+    }
+
+    prop_engine_get_config_json(prop_payload, 4096);
+    obj_start = strchr(prop_payload, '{');
+    obj_end = strrchr(prop_payload, '}');
+    if (!obj_start || !obj_end || obj_end <= obj_start) {
+        free(prop_payload);
+        snprintf(out, out_size, "{}");
+        return;
+    }
+
+    mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
+    mqtt_build_topic(state_topic, sizeof(state_topic), "state");
+    mqtt_build_topic(events_topic, sizeof(events_topic), "events");
+    mqtt_build_topic(warnings_topic, sizeof(warnings_topic), "warnings");
+
+    snprintf(out,
+             out_size,
+             "{"
+             "\"wifiSsid\":\"%s\","
+             "\"wifiPassword\":\"%s\","
+             "\"mqttHost\":\"%s\","
+             "\"mqttPort\":%d,"
+             "\"mqttUsername\":\"%s\","
+             "\"mqttPassword\":\"%s\","
+             "\"mqttBaseTopic\":\"%s\","
+             "\"mqttCommandTopic\":\"%s\","
+             "\"mqttStateTopic\":\"%s\","
+             "\"mqttEventsTopic\":\"%s\","
+             "\"mqttWarningsTopic\":\"%s\","
+             "\"mqttGameStateTopic\":\"%s\","
+             "\"mqttPropAnnounceTopic\":\"%s\","
+             "\"mqttPropStateTopic\":\"%s\","
+             "\"networkName\":\"%s\","
+             "\"apPassword\":\"%s\","
+             "\"apEnabled\":%s,"
+             "%.*s"
+             "}",
+             s_conn_cfg.wifi_ssid,
+             s_conn_cfg.wifi_password,
+             s_conn_cfg.mqtt_host,
+             s_conn_cfg.mqtt_port,
+             s_conn_cfg.mqtt_username,
+             s_conn_cfg.mqtt_password,
+             s_conn_cfg.mqtt_base_topic,
+             commands_topic,
+             state_topic,
+             events_topic,
+             warnings_topic,
+             s_conn_cfg.mqtt_game_state_topic,
+             s_conn_cfg.mqtt_prop_announce_topic,
+             s_conn_cfg.mqtt_prop_announce_topic,
+             s_conn_cfg.network_name,
+             s_conn_cfg.ap_password,
+             s_conn_cfg.ap_enabled ? "true" : "false",
+             (int)(obj_end - obj_start - 1),
+             obj_start + 1);
+
+    free(prop_payload);
+}
+
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
-    char payload[1024];
-    prop_engine_get_config_json(payload, sizeof(payload));
+    char *payload = (char *)calloc(1, 6144);
+    esp_err_t err;
+
+    if (!payload) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    build_unified_config_json(payload, 6144);
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+    err = httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+    free(payload);
+    return err;
 }
 
 static esp_err_t config_defaults_get_handler(httpd_req_t *req)
@@ -709,31 +1391,179 @@ static esp_err_t command_post_handler(httpd_req_t *req)
 {
     char body[512];
     char response[768];
+    char command_name[32] = "";
+    bool ok = true;
 
     if (read_request_body(req, body, sizeof(body)) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
         return ESP_FAIL;
     }
 
+    (void)json_extract_string_local(body, "command", command_name, sizeof(command_name));
     ESP_ERROR_CHECK(prop_engine_handle_command_json(body, response, sizeof(response)));
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    esp_err_t send_err = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    if (send_err == ESP_OK && !mqtt_publish_engine_events(true)) {
+        mqtt_publish_state(true);
+    }
+    if (send_err == ESP_OK && strcmp(command_name, "reboot") == 0 &&
+        (!json_extract_bool_local(response, "ok", &ok) || ok)) {
+        xTaskCreate(ota_reboot_task, "cmd_reboot", 2048, NULL, 5, NULL);
+    }
+    return send_err;
+}
+
+static void ota_reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    esp_restart();
+}
+
+static esp_err_t ota_upload_post_handler(httpd_req_t *req)
+{
+    const esp_partition_t *update_partition;
+    esp_ota_handle_t ota_handle = 0;
+    esp_err_t err;
+    char buf[1024];
+    int remaining;
+
+    if (req->content_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing firmware payload");
+        return ESP_FAIL;
+    }
+
+    update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition");
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
+        return err;
+    }
+
+    remaining = req->content_len;
+    while (remaining > 0) {
+        int to_read = remaining > (int)sizeof(buf) ? (int)sizeof(buf) : remaining;
+        int received = httpd_req_recv(req, buf, to_read);
+        if (received <= 0) {
+            esp_ota_abort(ota_handle);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA upload interrupted");
+            return ESP_FAIL;
+        }
+
+        err = esp_ota_write(ota_handle, (const void *)buf, (size_t)received);
+        if (err != ESP_OK) {
+            esp_ota_abort(ota_handle);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA write failed");
+            return err;
+        }
+
+        remaining -= received;
+    }
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA finalize failed");
+        return err;
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA boot partition failed");
+        return err;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    (void)httpd_resp_sendstr(req, "{\"ok\":true,\"message\":\"OTA complete, rebooting\"}");
+    xTaskCreate(ota_reboot_task, "ota_reboot", 2048, NULL, 5, NULL);
+    return ESP_OK;
 }
 
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    char body[1024];
+    char *body = NULL;
     char response[256];
+    char value[128];
     bool persist = strstr(req->uri, "/save") != NULL;
+    esp_err_t status = ESP_OK;
 
-    if (read_request_body(req, body, sizeof(body)) != ESP_OK) {
+    body = (char *)calloc(1, (size_t)req->content_len + 1);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (read_request_body(req, body, (size_t)req->content_len + 1) != ESP_OK) {
+        free(body);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
         return ESP_FAIL;
     }
 
-    ESP_ERROR_CHECK(prop_engine_apply_config_json(body, persist, response, sizeof(response)));
+    ESP_ERROR_CHECK(prop_engine_apply_config_json(body, false, response, sizeof(response)));
+
+    if (json_extract_string_local(body, "wifiSsid", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.wifi_ssid, sizeof(s_conn_cfg.wifi_ssid), value);
+    }
+    if (json_extract_string_local(body, "wifiPassword", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.wifi_password, sizeof(s_conn_cfg.wifi_password), value);
+    }
+    if (json_extract_string_local(body, "mqttHost", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.mqtt_host, sizeof(s_conn_cfg.mqtt_host), value);
+    }
+    if (json_extract_int_local(body, "mqttPort", &s_conn_cfg.mqtt_port)) {
+        if (s_conn_cfg.mqtt_port < 1 || s_conn_cfg.mqtt_port > 65535) {
+            s_conn_cfg.mqtt_port = 1883;
+        }
+    }
+    if (json_extract_string_local(body, "mqttUsername", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.mqtt_username, sizeof(s_conn_cfg.mqtt_username), value);
+    }
+    if (json_extract_string_local(body, "mqttPassword", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.mqtt_password, sizeof(s_conn_cfg.mqtt_password), value);
+    }
+    if (json_extract_string_local(body, "mqttBaseTopic", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.mqtt_base_topic, sizeof(s_conn_cfg.mqtt_base_topic), value);
+    }
+    if (json_extract_string_local(body, "mqttGameStateTopic", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.mqtt_game_state_topic, sizeof(s_conn_cfg.mqtt_game_state_topic), value);
+    }
+    if (json_extract_string_local(body, "mqttPropAnnounceTopic", value, sizeof(value)) ||
+        json_extract_string_local(body, "mqttPropStateTopic", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.mqtt_prop_announce_topic,
+                           sizeof(s_conn_cfg.mqtt_prop_announce_topic),
+                           value);
+    }
+    if (json_extract_string_local(body, "networkName", value, sizeof(value))) {
+        sanitize_network_name(value, s_conn_cfg.network_name, sizeof(s_conn_cfg.network_name));
+        (void)apply_mdns_hostname();
+    }
+    if (json_extract_string_local(body, "apPassword", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.ap_password, sizeof(s_conn_cfg.ap_password), value);
+    }
+    {
+        bool ap_val;
+        if (json_extract_bool_local(body, "apEnabled", &ap_val)) {
+            s_conn_cfg.ap_enabled = ap_val;
+        }
+    }
+
+    if (persist) {
+        esp_err_t save_err = save_connection_cfg_nvs();
+        if (save_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to persist unified config: %s", esp_err_to_name(save_err));
+        }
+    }
+
+    mqtt_start_client();
+
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    status = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    free(body);
+    return status;
 }
 
 static esp_err_t config_restore_post_handler(httpd_req_t *req)
@@ -741,7 +1571,13 @@ static esp_err_t config_restore_post_handler(httpd_req_t *req)
     char response[256];
     bool persist = strstr(req->uri, "/save") != NULL;
 
-    ESP_ERROR_CHECK(prop_engine_restore_defaults(persist, response, sizeof(response)));
+    ESP_ERROR_CHECK(prop_engine_restore_defaults(false, response, sizeof(response)));
+    if (persist) {
+        esp_err_t save_err = save_connection_cfg_nvs();
+        if (save_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to persist unified defaults: %s", esp_err_to_name(save_err));
+        }
+    }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
 }
@@ -749,14 +1585,29 @@ static esp_err_t config_restore_post_handler(httpd_req_t *req)
 static esp_err_t connection_get_handler(httpd_req_t *req)
 {
     char payload[2048];
+    char commands_topic[160];
+    char state_topic[160];
+    char events_topic[160];
+    char warnings_topic[160];
     char ap_ip_text[32] = "192.168.4.1";
+    char ap_ssid[33] = "Paradox-PXWiFiV1";
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    wifi_config_t ap_cfg = {0};
+
+    mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
+    mqtt_build_topic(state_topic, sizeof(state_topic), "state");
+    mqtt_build_topic(events_topic, sizeof(events_topic), "events");
+    mqtt_build_topic(warnings_topic, sizeof(warnings_topic), "warnings");
 
     if (ap_netif) {
         esp_netif_ip_info_t ip_info;
         if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
             snprintf(ap_ip_text, sizeof(ap_ip_text), IPSTR, IP2STR(&ip_info.ip));
         }
+    }
+
+    if (esp_wifi_get_config(WIFI_IF_AP, &ap_cfg) == ESP_OK && ap_cfg.ap.ssid[0] != '\0') {
+        snprintf(ap_ssid, sizeof(ap_ssid), "%s", (const char *)ap_cfg.ap.ssid);
     }
 
     snprintf(payload,
@@ -774,8 +1625,10 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
              "\"mqttEventsTopic\":\"%s\","
              "\"mqttWarningsTopic\":\"%s\","
              "\"mqttGameStateTopic\":\"%s\","
-             "\"mqttPropStateTopic\":\"%s\","
+             "\"mqttPropAnnounceTopic\":\"%s\"," 
+             "\"mqttPropStateTopic\":\"%s\"," 
              "\"networkName\":\"%s\","
+             "\"apSsid\":\"%s\","
              "\"apPassword\":\"%s\","
              "\"apIpAddress\":\"%s\","
              "\"apEnabled\":%s"
@@ -787,13 +1640,15 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
              s_conn_cfg.mqtt_username,
              s_conn_cfg.mqtt_password,
              s_conn_cfg.mqtt_base_topic,
-             s_conn_cfg.mqtt_commands_topic,
-             s_conn_cfg.mqtt_state_topic,
-             s_conn_cfg.mqtt_events_topic,
-             s_conn_cfg.mqtt_warnings_topic,
+             commands_topic,
+             state_topic,
+             events_topic,
+             warnings_topic,
              s_conn_cfg.mqtt_game_state_topic,
-             s_conn_cfg.mqtt_prop_state_topic,
+             s_conn_cfg.mqtt_prop_announce_topic,
+             s_conn_cfg.mqtt_prop_announce_topic,
              s_conn_cfg.network_name,
+             ap_ssid,
              s_conn_cfg.ap_password,
              ap_ip_text,
              s_conn_cfg.ap_enabled ? "true" : "false");
@@ -804,14 +1659,22 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
 
 static esp_err_t connection_post_handler(httpd_req_t *req)
 {
-    char body[1024];
+    char *body = NULL;
     char value[128];
     char new_wifi_ssid[sizeof(s_conn_cfg.wifi_ssid)];
     char new_wifi_password[sizeof(s_conn_cfg.wifi_password)];
     bool wifi_ssid_updated = false;
     bool wifi_password_updated = false;
+    esp_err_t status = ESP_OK;
 
-    if (read_request_body(req, body, sizeof(body)) != ESP_OK) {
+    body = (char *)calloc(1, (size_t)req->content_len + 1);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (read_request_body(req, body, (size_t)req->content_len + 1) != ESP_OK) {
+        free(body);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
         return ESP_FAIL;
     }
@@ -854,7 +1717,9 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
                      sizeof(err_payload),
                      "{\"ok\":false,\"applied\":false,\"error\":\"%s\"}",
                      validation_error);
-            return httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+            status = httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+            free(body);
+            return status;
         }
 
         copy_bounded_local(s_conn_cfg.wifi_ssid, sizeof(s_conn_cfg.wifi_ssid), new_wifi_ssid);
@@ -877,23 +1742,14 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
     if (json_extract_string_local(body, "mqttBaseTopic", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_base_topic, sizeof(s_conn_cfg.mqtt_base_topic), value);
     }
-    if (json_extract_string_local(body, "mqttCommandTopic", value, sizeof(value))) {
-        copy_bounded_local(s_conn_cfg.mqtt_commands_topic, sizeof(s_conn_cfg.mqtt_commands_topic), value);
-    }
-    if (json_extract_string_local(body, "mqttStateTopic", value, sizeof(value))) {
-        copy_bounded_local(s_conn_cfg.mqtt_state_topic, sizeof(s_conn_cfg.mqtt_state_topic), value);
-    }
-    if (json_extract_string_local(body, "mqttEventsTopic", value, sizeof(value))) {
-        copy_bounded_local(s_conn_cfg.mqtt_events_topic, sizeof(s_conn_cfg.mqtt_events_topic), value);
-    }
-    if (json_extract_string_local(body, "mqttWarningsTopic", value, sizeof(value))) {
-        copy_bounded_local(s_conn_cfg.mqtt_warnings_topic, sizeof(s_conn_cfg.mqtt_warnings_topic), value);
-    }
     if (json_extract_string_local(body, "mqttGameStateTopic", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_game_state_topic, sizeof(s_conn_cfg.mqtt_game_state_topic), value);
     }
-    if (json_extract_string_local(body, "mqttPropStateTopic", value, sizeof(value))) {
-        copy_bounded_local(s_conn_cfg.mqtt_prop_state_topic, sizeof(s_conn_cfg.mqtt_prop_state_topic), value);
+    if (json_extract_string_local(body, "mqttPropAnnounceTopic", value, sizeof(value)) ||
+        json_extract_string_local(body, "mqttPropStateTopic", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.mqtt_prop_announce_topic,
+                           sizeof(s_conn_cfg.mqtt_prop_announce_topic),
+                           value);
     }
     if (json_extract_string_local(body, "networkName", value, sizeof(value))) {
         sanitize_network_name(value, s_conn_cfg.network_name, sizeof(s_conn_cfg.network_name));
@@ -919,6 +1775,8 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
         }
     }
 
+    mqtt_start_client();
+
     esp_err_t wifi_ret = ESP_OK;
     bool connect_attempted = false;
     if (s_conn_cfg.wifi_ssid[0] != '\0') {
@@ -933,12 +1791,16 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
                  sizeof(err_payload),
                  "{\"ok\":false,\"applied\":true,\"connecting\":false,\"error\":\"%s\"}",
                  esp_err_to_name(wifi_ret));
-        return httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+        status = httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+        free(body);
+        return status;
     }
-    return httpd_resp_sendstr(req,
-                              connect_attempted
-                                  ? "{\"ok\":true,\"applied\":true,\"connecting\":true}"
-                                  : "{\"ok\":true,\"applied\":true,\"connecting\":false}");
+    status = httpd_resp_sendstr(req,
+                                connect_attempted
+                                    ? "{\"ok\":true,\"applied\":true,\"connecting\":true}"
+                                    : "{\"ok\":true,\"applied\":true,\"connecting\":false}");
+    free(body);
+    return status;
 }
 
 static esp_err_t device_details_get_handler(httpd_req_t *req)
@@ -1218,6 +2080,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             ESP_LOGI(TAG, "Re-enabling AP after STA disconnect");
             esp_wifi_set_mode(WIFI_MODE_APSTA);
         }
+
+        mqtt_stop_client();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_sta_connecting = false;
@@ -1237,6 +2101,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             s_ap_shutdown_pending = true;
             esp_timer_start_once(s_ap_shutdown_timer, 10000000);
         }
+
+        mqtt_start_client();
     }
 }
 
@@ -1276,8 +2142,6 @@ static esp_err_t wifi_connect_sta(const char *ssid, const char *password)
     s_sta_ip_text[0] = '\0';
     s_sta_last_disconnect_reason = 0;
     s_sta_last_error[0] = '\0';
-
-    /* Cancel any pending backoff reconnect */
     if (s_sta_reconnect_timer) {
         esp_timer_stop(s_sta_reconnect_timer);
     }
@@ -1341,7 +2205,7 @@ esp_err_t web_ui_start(void)
     {
         esp_err_t load_err = load_connection_cfg_nvs();
         if (load_err == ESP_OK) {
-            ESP_LOGI(TAG, "Loaded connection settings from NVS");
+            ESP_LOGI(TAG, "Loaded connection settings from /spiffs/config.json");
         } else {
             ESP_LOGI(TAG, "No saved connection settings yet (%s)", esp_err_to_name(load_err));
         }
@@ -1382,7 +2246,7 @@ esp_err_t web_ui_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.max_uri_handlers = 40;
-    config.stack_size = 8192;
+    config.stack_size = 12288;
 
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &config));
@@ -1418,6 +2282,22 @@ esp_err_t web_ui_start(void)
         .user_ctx = (void *)&ASSET_CONNECTION,
     };
     httpd_register_uri_handler(server, &connection_html_uri);
+
+    httpd_uri_t update_html_uri = {
+        .uri = "/update",
+        .method = HTTP_GET,
+        .handler = static_asset_handler,
+        .user_ctx = (void *)&ASSET_UPDATE,
+    };
+    httpd_register_uri_handler(server, &update_html_uri);
+
+    httpd_uri_t update_html2_uri = {
+        .uri = "/update.html",
+        .method = HTTP_GET,
+        .handler = static_asset_handler,
+        .user_ctx = (void *)&ASSET_UPDATE,
+    };
+    httpd_register_uri_handler(server, &update_html2_uri);
 
     httpd_uri_t styles_css_uri = {
         .uri = "/styles.css",
@@ -1485,6 +2365,14 @@ esp_err_t web_ui_start(void)
         .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &command_post_uri);
+
+    httpd_uri_t ota_upload_uri = {
+        .uri = "/api/ota/upload",
+        .method = HTTP_POST,
+        .handler = ota_upload_post_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &ota_upload_uri);
 
     httpd_uri_t config_post_uri = {
         .uri = "/api/config",
@@ -1557,6 +2445,8 @@ esp_err_t web_ui_start(void)
         .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &device_name_uri);
+
+    xTaskCreate(mqtt_state_task, "mqtt_state", 4096, NULL, 5, NULL);
 
     ESP_LOGI(TAG, "HTTP server started");
     return ESP_OK;

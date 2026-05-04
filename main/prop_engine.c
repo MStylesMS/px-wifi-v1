@@ -43,11 +43,24 @@ static const gpio_num_t s_wire_ground_gpio = GPIO_NUM_8;
 #define BATTERY_ADC_FULL_SCALE_MV 15000
 #define LOW_BATTERY_CUTOFF_DELAY_MS 15000
 #define DEEP_SLEEP_WAKE_GPIO GPIO_NUM_4
+#define RESULT_RESET_DELAY_S 60
+#define PROP_EVENT_QUEUE_LEN 8
+#define PROP_EVENT_NAME_LEN 24
 
 typedef struct {
     int mv;
     int pct;
 } battery_point_t;
+
+typedef struct {
+    char name[PROP_EVENT_NAME_LEN];
+    char mode[16];
+    prop_state_t state;
+    int time_remaining_ms;
+    int tries_used;
+    int max_tries;
+    int64_t ts_ms;
+} prop_event_t;
 
 typedef struct {
     const char *name;
@@ -109,6 +122,8 @@ typedef struct {
     prop_state_t state;
     int time_remaining_ms;
     int tries_used;
+    bool ready_show_time;
+    bool stopped;
     uint8_t connected_mask;
     char disconnected_order[9];
     char last_cmd[24];
@@ -130,6 +145,9 @@ typedef struct {
     int64_t battery_cutoff_since_ms;
     battery_point_t battery_points[BATTERY_MAX_POINTS];
     int battery_point_count;
+    prop_event_t event_queue[PROP_EVENT_QUEUE_LEN];
+    int event_head;
+    int event_tail;
 
     bool spiffs_ready;
     SemaphoreHandle_t lock;
@@ -140,6 +158,7 @@ static prop_ctx_t s_ctx;
 static void prop_engine_get_state_json_unlocked(char *out, size_t out_size);
 static void handle_disconnect_unlocked(int idx);
 static void handle_connect_unlocked(int idx);
+static void queue_event_unlocked(const char *event_name);
 
 static void configure_deep_sleep_wake_gpio(void)
 {
@@ -630,7 +649,7 @@ static void set_default_config(prop_config_t *cfg)
     cfg->debounce_check_interval_ms = 10;
     cfg->debounce_consecutive_reads = 5;
     cfg->dedupe_window_ms = 750;
-    cfg->hold_result_s = 300;
+    cfg->hold_result_s = RESULT_RESET_DELAY_S;
     cfg->heartbeat_interval_s = 10;
     cfg->keep_sync_max_drift_ms = 1000;
     cfg->led_brightness_percent = 20;
@@ -641,7 +660,7 @@ static void set_default_config(prop_config_t *cfg)
     cfg->keep_sync_enabled = false;
     cfg->lid_enabled = false;
     cfg->lid_normally_closed = false;
-    snprintf(cfg->mode, sizeof(cfg->mode), "penalty");
+    snprintf(cfg->mode, sizeof(cfg->mode), "instant");
     snprintf(cfg->lid_mode, sizeof(cfg->lid_mode), "off");
     snprintf(cfg->solution, sizeof(cfg->solution), "1234");
 
@@ -770,8 +789,38 @@ static void reset_round(void)
 {
     s_ctx.time_remaining_ms = s_ctx.cfg.default_time_s * 1000;
     s_ctx.tries_used = 0;
+    s_ctx.ready_show_time = false;
+    s_ctx.stopped = false;
+    s_ctx.penalty_until_ms = 0;
     s_ctx.disconnected_order[0] = '\0';
     set_ready_state();
+}
+
+static void queue_event_unlocked(const char *event_name)
+{
+    int next_tail;
+    prop_event_t *slot;
+
+    if (!event_name || !event_name[0]) {
+        return;
+    }
+
+    next_tail = (s_ctx.event_tail + 1) % PROP_EVENT_QUEUE_LEN;
+    if (next_tail == s_ctx.event_head) {
+        s_ctx.event_head = (s_ctx.event_head + 1) % PROP_EVENT_QUEUE_LEN;
+        ESP_LOGW(TAG, "Event queue full, dropping oldest event");
+    }
+
+    slot = &s_ctx.event_queue[s_ctx.event_tail];
+    memset(slot, 0, sizeof(*slot));
+    snprintf(slot->name, sizeof(slot->name), "%s", event_name);
+    snprintf(slot->mode, sizeof(slot->mode), "%s", s_ctx.cfg.mode);
+    slot->state = s_ctx.state;
+    slot->time_remaining_ms = s_ctx.time_remaining_ms;
+    slot->tries_used = s_ctx.tries_used;
+    slot->max_tries = s_ctx.cfg.max_tries;
+    slot->ts_ms = now_ms();
+    s_ctx.event_tail = next_tail;
 }
 
 static bool is_active_state(void)
@@ -1028,8 +1077,9 @@ static void apply_config_json_unlocked(const char *json)
         s_ctx.cfg.dedupe_window_ms = i_val;
     }
     if (json_extract_int(json, "holdResultSeconds", &i_val) && i_val >= 1 && i_val <= 1800) {
-        s_ctx.cfg.hold_result_s = i_val;
+        s_ctx.cfg.hold_result_s = RESULT_RESET_DELAY_S;
     }
+    s_ctx.cfg.hold_result_s = RESULT_RESET_DELAY_S;
     if (json_extract_int(json, "heartbeatInterval", &i_val)) {
         if (i_val >= 100 && i_val <= 120000) {
             s_ctx.cfg.heartbeat_interval_s = i_val / 1000;
@@ -1366,43 +1416,42 @@ static void enter_result_state(prop_state_t target)
     s_ctx.state_enter_ms = now_ms();
     if (prev != target) {
         ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev), state_name(target));
+        if (target == PROP_STATE_DEFUSED) {
+            queue_event_unlocked("disarmed");
+        } else if (target == PROP_STATE_DETONATED) {
+            queue_event_unlocked("detonated");
+        }
     }
 }
 
 static void apply_wrong_wire_logic(void)
 {
+    int penalty_ms;
+
     s_ctx.penalty_until_ms = now_ms() + 3000;
 
     if (strcmp(s_ctx.cfg.mode, "instant") == 0) {
         enter_result_state(PROP_STATE_DETONATED);
-        s_ctx.time_remaining_ms = 0;
         return;
     }
 
     s_ctx.tries_used++;
     if (s_ctx.tries_used >= s_ctx.cfg.max_tries) {
         enter_result_state(PROP_STATE_DETONATED);
-        s_ctx.time_remaining_ms = 0;
         return;
     }
 
     if (strcmp(s_ctx.cfg.mode, "penalty") == 0) {
-        if (s_ctx.time_remaining_ms < 30000) {
-            s_ctx.time_remaining_ms = 0;
+        penalty_ms = s_ctx.cfg.penalty_s * 1000;
+        if (penalty_ms >= s_ctx.time_remaining_ms) {
             enter_result_state(PROP_STATE_DETONATED);
-            return;
-        }
-        if (s_ctx.time_remaining_ms < 60000) {
-            s_ctx.time_remaining_ms = 20000;
             return;
         }
 
-        s_ctx.time_remaining_ms -= s_ctx.cfg.penalty_s * 1000;
-        if (s_ctx.time_remaining_ms <= 0) {
-            s_ctx.time_remaining_ms = 0;
-            enter_result_state(PROP_STATE_DETONATED);
-        }
+        s_ctx.time_remaining_ms -= penalty_ms;
     }
+
+    queue_event_unlocked("BAD-ATTEMPT");
 }
 
 static void handle_disconnect_unlocked(int idx)
@@ -1420,6 +1469,10 @@ static void handle_disconnect_unlocked(int idx)
     }
 
     s_ctx.connected_mask &= (uint8_t)(~(1u << (idx - 1)));
+
+    if (s_ctx.state == PROP_STATE_DETONATED) {
+        return;
+    }
 
     if (s_ctx.state != PROP_STATE_COUNTDOWN && s_ctx.state != PROP_STATE_PAUSED) {
         set_ready_state();
@@ -1457,6 +1510,10 @@ static void handle_connect_unlocked(int idx)
     }
 
     s_ctx.connected_mask |= (uint8_t)(1u << (idx - 1));
+
+    if (s_ctx.state == PROP_STATE_DETONATED) {
+        return;
+    }
 
     if (!is_active_state()) {
         set_ready_state();
@@ -1846,8 +1903,50 @@ void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out)
     out->time_remaining_ms = s_ctx.time_remaining_ms;
     out->connected_mask = s_ctx.connected_mask;
     out->wire_count = s_ctx.cfg.wire_count;
+    out->ready_show_time = s_ctx.ready_show_time;
+    out->stopped = s_ctx.stopped;
     copy_bounded(out->lid_mode, sizeof(out->lid_mode), s_ctx.cfg.lid_mode);
     xSemaphoreGive(s_ctx.lock);
+}
+
+bool prop_engine_pop_event_json(char *out, size_t out_size)
+{
+    prop_event_t event;
+
+    if (!out || out_size < 8) {
+        return false;
+    }
+
+    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (s_ctx.event_head == s_ctx.event_tail) {
+        xSemaphoreGive(s_ctx.lock);
+        out[0] = '\0';
+        return false;
+    }
+
+    event = s_ctx.event_queue[s_ctx.event_head];
+    s_ctx.event_head = (s_ctx.event_head + 1) % PROP_EVENT_QUEUE_LEN;
+    xSemaphoreGive(s_ctx.lock);
+
+    snprintf(out,
+             out_size,
+             "{"
+             "\"event\":\"%s\","
+             "\"ts\":%lld,"
+             "\"state\":\"%s\","
+             "\"timeRemaining\":%d,"
+             "\"triesUsed\":%d,"
+             "\"maxTries\":%d,"
+             "\"mode\":\"%s\""
+             "}",
+             event.name,
+             (long long)event.ts_ms,
+             state_name(event.state),
+             event.time_remaining_ms / 1000,
+             event.tries_used,
+             event.max_tries,
+             event.mode);
+    return true;
 }
 
 static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char *response, size_t response_size)
@@ -1875,32 +1974,90 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
         return ESP_OK;
     }
 
-    if (strcmp(cmd, "start") == 0 || strcmp(cmd, "resume") == 0) {
+    if (strcmp(cmd, "start") == 0) {
         prev_state = s_ctx.state;
 
         if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
             s_ctx.time_remaining_ms = i_val * 1000;
         }
 
-        if (!all_wires_connected()) {
+        s_ctx.ready_show_time = false;
+        s_ctx.stopped = false;
+
+        if (s_ctx.state != PROP_STATE_READY) {
             set_ready_state();
-            /* Build list of disconnected input names */
-            char disc_list[160] = "";
-            int pos = 0;
-            uint8_t required = (uint8_t)((1u << s_ctx.cfg.wire_count) - 1u);
-            uint8_t missing = required & ~s_ctx.connected_mask;
-            for (int b = 0; b < s_ctx.cfg.wire_count; b++) {
-                if (missing & (1u << b)) {
-                    if (pos > 0) { disc_list[pos++] = ','; disc_list[pos++] = ' '; }
-                    const char *name = s_ctx.cfg.input_names[b];
-                    while (*name && pos < (int)sizeof(disc_list) - 1) { disc_list[pos++] = *name++; }
+            if (!all_wires_connected()) {
+                char disc_list[160] = "";
+                int pos = 0;
+                uint8_t required = (uint8_t)((1u << s_ctx.cfg.wire_count) - 1u);
+                uint8_t missing = required & ~s_ctx.connected_mask;
+                for (int b = 0; b < s_ctx.cfg.wire_count; b++) {
+                    if (missing & (1u << b)) {
+                        if (pos > 0) {
+                            disc_list[pos++] = ',';
+                            disc_list[pos++] = ' ';
+                        }
+                        const char *name = s_ctx.cfg.input_names[b];
+                        while (*name && pos < (int)sizeof(disc_list) - 1) {
+                            disc_list[pos++] = *name++;
+                        }
+                    }
                 }
+                disc_list[pos] = '\0';
+                snprintf(response,
+                         response_size,
+                         "{\"ok\":false,\"error\":\"notReady\",\"event\":\"startIgnored\","
+                         "\"message\":\"Failed due to wires not connected\","
+                         "\"details\":\"Inputs not closed: %s\","
+                         "\"disconnected\":\"%s\"}",
+                         disc_list,
+                         disc_list);
+            } else {
+                snprintf(response,
+                         response_size,
+                         "{\"ok\":false,\"error\":\"notReady\",\"event\":\"startIgnored\","
+                         "\"message\":\"Failed because prop is not in ready state\"}");
             }
-            disc_list[pos] = '\0';
-            snprintf(response, response_size,
-                     "{\"ok\":false,\"error\":\"notReady\",\"event\":\"startIgnored\","
-                     "\"message\":\"Start ignored: inputs not closed: %s\","
-                     "\"disconnected\":\"%s\"}", disc_list, disc_list);
+            return ESP_OK;
+        }
+
+        if (s_ctx.time_remaining_ms <= 0) {
+            s_ctx.time_remaining_ms = s_ctx.cfg.default_time_s * 1000;
+        }
+
+        s_ctx.state = PROP_STATE_COUNTDOWN;
+        if (prev_state != s_ctx.state) {
+            ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev_state), state_name(s_ctx.state));
+        }
+        snprintf(response, response_size, "{\"ok\":true,\"state\":\"countdown\"}");
+        return ESP_OK;
+    }
+
+    if (strcmp(cmd, "resume") == 0) {
+        prev_state = s_ctx.state;
+
+        if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
+            s_ctx.time_remaining_ms = i_val * 1000;
+        }
+
+        s_ctx.ready_show_time = false;
+        s_ctx.stopped = false;
+
+        if (s_ctx.state == PROP_STATE_READY) {
+            if (s_ctx.time_remaining_ms <= 0) {
+                s_ctx.time_remaining_ms = s_ctx.cfg.default_time_s * 1000;
+            }
+
+            s_ctx.state = PROP_STATE_COUNTDOWN;
+            if (prev_state != s_ctx.state) {
+                ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev_state), state_name(s_ctx.state));
+            }
+            snprintf(response, response_size, "{\"ok\":true,\"state\":\"countdown\"}");
+            return ESP_OK;
+        }
+
+        if (s_ctx.state != PROP_STATE_PAUSED) {
+            snprintf(response, response_size, "{\"ok\":false,\"error\":\"notPaused\"}");
             return ESP_OK;
         }
 
@@ -1920,6 +2077,8 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
         if (s_ctx.state == PROP_STATE_COUNTDOWN) {
             prev_state = s_ctx.state;
             s_ctx.state = PROP_STATE_PAUSED;
+            s_ctx.ready_show_time = false;
+            s_ctx.stopped = (strcmp(cmd, "stop") == 0);
             ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev_state), state_name(s_ctx.state));
             snprintf(response, response_size, "{\"ok\":true,\"state\":\"paused\"}");
         } else {
@@ -1930,7 +2089,17 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
 
     if (strcmp(cmd, "reset") == 0) {
         ESP_LOGI(TAG, "Reset requested");
-        reset_round();
+        s_ctx.penalty_until_ms = 0;
+        if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
+            s_ctx.time_remaining_ms = i_val * 1000;
+            s_ctx.tries_used = 0;
+            s_ctx.disconnected_order[0] = '\0';
+            s_ctx.stopped = false;
+            set_ready_state();
+            s_ctx.ready_show_time = (s_ctx.state == PROP_STATE_READY);
+        } else {
+            reset_round();
+        }
         snprintf(response, response_size, "{\"ok\":true,\"state\":\"%s\"}", state_name(s_ctx.state));
         return ESP_OK;
     }
@@ -2074,7 +2243,7 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
         return ESP_OK;
     }
 
-    if (strcmp(cmd, "wake") == 0 || strcmp(cmd, "identify") == 0 || strcmp(cmd, "restart") == 0) {
+    if (strcmp(cmd, "wake") == 0 || strcmp(cmd, "identify") == 0 || strcmp(cmd, "reboot") == 0) {
         snprintf(response, response_size, "{\"ok\":true,\"command\":\"%s\"}", cmd);
         return ESP_OK;
     }

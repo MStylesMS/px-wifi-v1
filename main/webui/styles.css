@@ -500,6 +500,11 @@ textarea {
     font-size: 0.85rem;
 }
 
+.connection-detail-item {
+    width: 100%;
+    box-sizing: border-box;
+}
+
 .input-suffix-wrap {
     display: flex;
     align-items: center;

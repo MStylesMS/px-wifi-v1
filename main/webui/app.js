@@ -76,7 +76,7 @@
                 timeRemaining: 3600,
                 triesUsed: 0,
                 maxTries: 3,
-                mode: "penalty",
+                mode: "instant",
                 wireCount: 4,
                 connectedMask: 15,
                 battery: 100,
@@ -94,7 +94,7 @@
                 penalty: 30,
                 maxTries: 3,
                 wireCount: 4,
-                mode: "penalty",
+                mode: "instant",
                 lidMode: "off",
                 solution: "1234",
                 keepSyncEnabled: false,
@@ -128,6 +128,7 @@
                     freeMemoryBytes: 243712,
                     batteryPercent: 100,
                     networkName: "px-wifi-v1-a1b2",
+                    apSsid: "Paradox-PXWiFiV1-A1B2",
                     status: "ready",
                     apIpAddress: "192.168.4.1",
                     wifiConnected: false,
@@ -175,14 +176,15 @@
                 mqttPort: 1883,
                 mqttUsername: "",
                 mqttPassword: "",
-                mqttBaseTopic: "paradox",
-                mqttCommandTopic: "paradox/site/zone/commands",
-                mqttStateTopic: "paradox/site/zone/state",
-                mqttEventsTopic: "paradox/site/zone/events",
-                mqttWarningsTopic: "paradox/site/zone/warnings",
-                mqttGameStateTopic: "paradox/game/state",
-                mqttPropStateTopic: "paradox/state",
+                mqttBaseTopic: "site/room/zone",
+                mqttCommandTopic: "site/room/zone/commands",
+                mqttStateTopic: "site/room/zone/state",
+                mqttEventsTopic: "site/room/zone/events",
+                mqttWarningsTopic: "site/room/zone/warnings",
+                mqttGameStateTopic: "site/room/state",
+                mqttPropAnnounceTopic: "site/props",
                 networkName: "px-wifi-v1-a1b2",
+                apSsid: "Paradox-PXWiFiV1-A1B2",
                 apIpAddress: "192.168.4.1",
                 apPassword: "",
                 apEnabled: true
@@ -690,14 +692,17 @@
             el("mqttPort").value = cfg.mqttPort || 1883;
             el("mqttUsername").value = cfg.mqttUsername || "";
             el("mqttPassword").value = cfg.mqttPassword || "";
-            el("mqttBaseTopic").value = cfg.mqttBaseTopic || "paradox";
-            el("mqttCommandTopic").value = cfg.mqttCommandTopic || "";
-            el("mqttStateTopic").value = cfg.mqttStateTopic || "";
-            el("mqttEventsTopic").value = cfg.mqttEventsTopic || "";
-            el("mqttWarningsTopic").value = cfg.mqttWarningsTopic || "";
+            el("mqttBaseTopic").value = cfg.mqttBaseTopic || "site/room/zone";
+            el("mqttCommandTopic").textContent = cfg.mqttCommandTopic || "";
+            el("mqttStateTopic").textContent = cfg.mqttStateTopic || "";
+            el("mqttEventsTopic").textContent = cfg.mqttEventsTopic || "";
+            el("mqttWarningsTopic").textContent = cfg.mqttWarningsTopic || "";
             el("mqttGameStateTopic").value = cfg.mqttGameStateTopic || "";
-            el("mqttPropStateTopic").value = cfg.mqttPropStateTopic || "";
+            el("mqttPropAnnounceTopic").value = cfg.mqttPropAnnounceTopic || cfg.mqttPropStateTopic || "";
             el("networkName").value = cfg.networkName || "";
+            if (el("apSsidDisplay")) {
+                el("apSsidDisplay").textContent = cfg.apSsid || "Paradox-PXWiFiV1";
+            }
             if (el("apPassword")) {
                 el("apPassword").value = cfg.apPassword || "";
             }
@@ -885,6 +890,7 @@
                     body: JSON.stringify(payload)
                 });
                 appendLog(log, { applyMqtt: payload, result: result });
+                await loadConnection();
             } catch (err) {
                 appendLog(log, { error: String(err) });
             }
@@ -893,12 +899,9 @@
         el("applyTopics").addEventListener("click", async () => {
             try {
                 const payload = {
-                    mqttCommandTopic: el("mqttCommandTopic").value,
-                    mqttStateTopic: el("mqttStateTopic").value,
-                    mqttEventsTopic: el("mqttEventsTopic").value,
-                    mqttWarningsTopic: el("mqttWarningsTopic").value,
+                    mqttBaseTopic: el("mqttBaseTopic").value,
                     mqttGameStateTopic: el("mqttGameStateTopic").value,
-                    mqttPropStateTopic: el("mqttPropStateTopic").value
+                    mqttPropAnnounceTopic: el("mqttPropAnnounceTopic").value
                 };
                 const result = await api("/api/connection", {
                     method: "POST",
@@ -906,6 +909,7 @@
                     body: JSON.stringify(payload)
                 });
                 appendLog(log, { applyTopics: payload, result: result });
+                await loadConnection();
             } catch (err) {
                 appendLog(log, { error: String(err) });
             }
