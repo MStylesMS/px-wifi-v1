@@ -126,7 +126,7 @@ typedef struct {
     bool stopped;
     uint8_t connected_mask;
     char disconnected_order[9];
-    char last_cmd[24];
+    char last_cmd[128];
     int64_t last_cmd_ms;
     int64_t state_enter_ms;
     int64_t penalty_until_ms;
@@ -159,6 +159,9 @@ static void prop_engine_get_state_json_unlocked(char *out, size_t out_size);
 static void handle_disconnect_unlocked(int idx);
 static void handle_connect_unlocked(int idx);
 static void queue_event_unlocked(const char *event_name);
+static const char *state_name(prop_state_t state);
+static bool json_extract_string(const char *json, const char *key, char *out, size_t out_size);
+static bool json_extract_int(const char *json, const char *key, int *out);
 
 static void configure_deep_sleep_wake_gpio(void)
 {
@@ -388,6 +391,128 @@ static void copy_bounded(char *dst, size_t dst_size, const char *src)
 static int heartbeat_ms_from_cfg(const prop_config_t *cfg)
 {
     return cfg->heartbeat_interval_s * 1000;
+}
+
+static bool parse_time_text_to_seconds(const char *text, int *out_seconds)
+{
+    int hh = 0;
+    int mm = 0;
+    int ss = 0;
+    char *endptr = NULL;
+    long value;
+
+    if (!text || !text[0] || !out_seconds) {
+        return false;
+    }
+
+    if (sscanf(text, "%d:%d:%d", &hh, &mm, &ss) == 3) {
+        if (hh < 0 || mm < 0 || ss < 0) {
+            return false;
+        }
+        *out_seconds = (hh * 3600) + (mm * 60) + ss;
+        return true;
+    }
+
+    if (sscanf(text, "%d:%d", &mm, &ss) == 2) {
+        if (mm < 0 || ss < 0) {
+            return false;
+        }
+        *out_seconds = (mm * 60) + ss;
+        return true;
+    }
+
+    value = strtol(text, &endptr, 10);
+    if (!endptr || *endptr != '\0' || value < 0 || value > 24L * 3600L) {
+        return false;
+    }
+
+    *out_seconds = (int)value;
+    return true;
+}
+
+static bool json_extract_time_seconds(const char *json, const char *key, int *out_seconds)
+{
+    int int_value;
+    char text_value[32];
+
+    if (json_extract_string(json, key, text_value, sizeof(text_value))) {
+        return parse_time_text_to_seconds(text_value, out_seconds);
+    }
+
+    if (json_extract_int(json, key, &int_value) && int_value >= 0) {
+        *out_seconds = int_value;
+        return true;
+    }
+
+    return false;
+}
+
+static void build_disconnected_inputs_list(char *out, size_t out_size)
+{
+    uint8_t required = (uint8_t)((1u << s_ctx.cfg.wire_count) - 1u);
+    uint8_t missing = (uint8_t)(required & ~s_ctx.connected_mask);
+    size_t pos = 0;
+
+    if (!out || out_size == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+    for (int bit = 0; bit < s_ctx.cfg.wire_count; ++bit) {
+        const char *name;
+
+        if ((missing & (1u << bit)) == 0) {
+            continue;
+        }
+
+        if (pos > 0 && pos < out_size - 1) {
+            out[pos++] = ',';
+        }
+        if (pos > 0 && pos < out_size - 1) {
+            out[pos++] = ' ';
+        }
+
+        name = s_ctx.cfg.input_names[bit];
+        while (*name && pos < out_size - 1) {
+            out[pos++] = *name++;
+        }
+    }
+    out[pos] = '\0';
+}
+
+static void build_not_ready_response(const char *event_name,
+                                     const char *message,
+                                     bool ok,
+                                     char *response,
+                                     size_t response_size)
+{
+    char disc_list[160];
+
+    build_disconnected_inputs_list(disc_list, sizeof(disc_list));
+    if (disc_list[0] != '\0') {
+        snprintf(response,
+                 response_size,
+                 "{\"ok\":%s,\"error\":\"notReady\",\"event\":\"%s\","
+                 "\"state\":\"%s\",\"message\":\"%s\","
+                 "\"details\":\"Inputs not closed: %s\","
+                 "\"disconnected\":\"%s\"}",
+                 ok ? "true" : "false",
+                 event_name,
+                 state_name(s_ctx.state),
+                 message,
+                 disc_list,
+                 disc_list);
+        return;
+    }
+
+    snprintf(response,
+             response_size,
+             "{\"ok\":%s,\"error\":\"notReady\",\"event\":\"%s\","
+             "\"state\":\"%s\",\"message\":\"%s\"}",
+             ok ? "true" : "false",
+             event_name,
+             state_name(s_ctx.state),
+             message);
 }
 
 static int solution_length_unlocked(void)
@@ -1417,7 +1542,7 @@ static void enter_result_state(prop_state_t target)
     if (prev != target) {
         ESP_LOGI(TAG, "State transition: %s -> %s", state_name(prev), state_name(target));
         if (target == PROP_STATE_DEFUSED) {
-            queue_event_unlocked("disarmed");
+            queue_event_unlocked("defused");
         } else if (target == PROP_STATE_DETONATED) {
             queue_event_unlocked("detonated");
         }
@@ -1520,13 +1645,17 @@ static void handle_connect_unlocked(int idx)
     }
 }
 
-static bool command_is_deduped(const char *cmd)
+static bool command_is_deduped(const char *signature)
 {
     int64_t ts = now_ms();
-    if (strcmp(cmd, s_ctx.last_cmd) == 0 && (ts - s_ctx.last_cmd_ms) < s_ctx.cfg.dedupe_window_ms) {
+    if (!signature || !signature[0]) {
+        return false;
+    }
+
+    if (strcmp(signature, s_ctx.last_cmd) == 0 && (ts - s_ctx.last_cmd_ms) < s_ctx.cfg.dedupe_window_ms) {
         return true;
     }
-    snprintf(s_ctx.last_cmd, sizeof(s_ctx.last_cmd), "%s", cmd);
+    copy_bounded(s_ctx.last_cmd, sizeof(s_ctx.last_cmd), signature);
     s_ctx.last_cmd_ms = ts;
     return false;
 }
@@ -1679,7 +1808,6 @@ void prop_engine_get_state_json(char *out, size_t out_size)
 
 static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
 {
-    const esp_app_desc_t *app = esp_app_get_description();
     int64_t ts;
     ts = now_ms();
 
@@ -1699,17 +1827,8 @@ static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
              "\"wireCount\":%d,"
              "\"connectedMask\":%u,"
              "\"battery\":%d,"
-             "\"batteryAdcRaw\":%d,"
-             "\"batteryAdcAt0V\":%d,"
-             "\"batteryAdcAt15V\":%d,"
              "\"batteryVoltageMv\":%d,"
-             "\"batteryProfile\":\"%s\","
-             "\"lowBattery\":%s,"
-             "\"ledHint\":\"%s\","
-             "\"version\":\"%s\","
-             "\"buildId\":\"%s\","
-             "\"buildDate\":\"%s\","
-             "\"buildTime\":\"%s\""
+             "\"lowBattery\":%s"
              "}",
              (long long)ts,
              state_name(s_ctx.state),
@@ -1722,17 +1841,8 @@ static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
              s_ctx.cfg.wire_count,
              (unsigned)s_ctx.connected_mask,
              s_ctx.battery_percent,
-             s_ctx.battery_adc_raw,
-             s_ctx.battery_adc_at_0v,
-             s_ctx.battery_adc_at_15v,
              s_ctx.battery_voltage_mv,
-             s_ctx.battery_profile,
-             s_ctx.battery_low ? "true" : "false",
-             led_hint_name(led_hint_unlocked()),
-             app->version,
-             app->version,
-             app->date,
-             app->time);
+             s_ctx.battery_low ? "true" : "false");
 }
 
 void prop_engine_get_config_json(char *out, size_t out_size)
@@ -1959,7 +2069,7 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
              state_name(s_ctx.state),
              s_ctx.time_remaining_ms / 1000);
 
-    if (command_is_deduped(cmd) && strcmp(cmd, "getState") != 0) {
+    if (command_is_deduped((json && json[0]) ? json : cmd) && strcmp(cmd, "getState") != 0) {
         snprintf(response, response_size, "{\"ok\":true,\"deduped\":true}");
         return ESP_OK;
     }
@@ -1977,7 +2087,7 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
     if (strcmp(cmd, "start") == 0) {
         prev_state = s_ctx.state;
 
-        if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
+        if (json_extract_time_seconds(json, "time", &i_val) && i_val >= 0) {
             s_ctx.time_remaining_ms = i_val * 1000;
         }
 
@@ -1987,31 +2097,11 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
         if (s_ctx.state != PROP_STATE_READY) {
             set_ready_state();
             if (!all_wires_connected()) {
-                char disc_list[160] = "";
-                int pos = 0;
-                uint8_t required = (uint8_t)((1u << s_ctx.cfg.wire_count) - 1u);
-                uint8_t missing = required & ~s_ctx.connected_mask;
-                for (int b = 0; b < s_ctx.cfg.wire_count; b++) {
-                    if (missing & (1u << b)) {
-                        if (pos > 0) {
-                            disc_list[pos++] = ',';
-                            disc_list[pos++] = ' ';
-                        }
-                        const char *name = s_ctx.cfg.input_names[b];
-                        while (*name && pos < (int)sizeof(disc_list) - 1) {
-                            disc_list[pos++] = *name++;
-                        }
-                    }
-                }
-                disc_list[pos] = '\0';
-                snprintf(response,
-                         response_size,
-                         "{\"ok\":false,\"error\":\"notReady\",\"event\":\"startIgnored\","
-                         "\"message\":\"Failed due to wires not connected\","
-                         "\"details\":\"Inputs not closed: %s\","
-                         "\"disconnected\":\"%s\"}",
-                         disc_list,
-                         disc_list);
+                build_not_ready_response("startIgnored",
+                                         "Failed due to wires not connected",
+                                         false,
+                                         response,
+                                         response_size);
             } else {
                 snprintf(response,
                          response_size,
@@ -2036,14 +2126,24 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
     if (strcmp(cmd, "resume") == 0) {
         prev_state = s_ctx.state;
 
-        if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
+        if (json_extract_time_seconds(json, "time", &i_val) && i_val >= 0) {
             s_ctx.time_remaining_ms = i_val * 1000;
         }
 
         s_ctx.ready_show_time = false;
         s_ctx.stopped = false;
 
-        if (s_ctx.state == PROP_STATE_READY) {
+        if (s_ctx.state == PROP_STATE_READY || s_ctx.state == PROP_STATE_NOT_READY) {
+            set_ready_state();
+            if (!all_wires_connected()) {
+                build_not_ready_response("resumeIgnored",
+                                         "Failed due to wires not connected",
+                                         false,
+                                         response,
+                                         response_size);
+                return ESP_OK;
+            }
+
             if (s_ctx.time_remaining_ms <= 0) {
                 s_ctx.time_remaining_ms = s_ctx.cfg.default_time_s * 1000;
             }
@@ -2058,6 +2158,16 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
 
         if (s_ctx.state != PROP_STATE_PAUSED) {
             snprintf(response, response_size, "{\"ok\":false,\"error\":\"notPaused\"}");
+            return ESP_OK;
+        }
+
+        if (!all_wires_connected()) {
+            set_ready_state();
+            build_not_ready_response("resumeIgnored",
+                                     "Failed due to wires not connected",
+                                     false,
+                                     response,
+                                     response_size);
             return ESP_OK;
         }
 
@@ -2090,7 +2200,7 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
     if (strcmp(cmd, "reset") == 0) {
         ESP_LOGI(TAG, "Reset requested");
         s_ctx.penalty_until_ms = 0;
-        if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
+        if (json_extract_time_seconds(json, "time", &i_val) && i_val >= 0) {
             s_ctx.time_remaining_ms = i_val * 1000;
             s_ctx.tries_used = 0;
             s_ctx.disconnected_order[0] = '\0';
@@ -2100,12 +2210,24 @@ static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char
         } else {
             reset_round();
         }
-        snprintf(response, response_size, "{\"ok\":true,\"state\":\"%s\"}", state_name(s_ctx.state));
+
+        if (!all_wires_connected()) {
+            build_not_ready_response("resetApplied",
+                                     "Reset completed but prop is not ready",
+                                     true,
+                                     response,
+                                     response_size);
+        } else {
+            snprintf(response,
+                     response_size,
+                     "{\"ok\":true,\"state\":\"%s\"}",
+                     state_name(s_ctx.state));
+        }
         return ESP_OK;
     }
 
     if (strcmp(cmd, "setTime") == 0) {
-        if (json_extract_int(json, "time", &i_val) && i_val >= 0) {
+        if (json_extract_time_seconds(json, "time", &i_val) && i_val >= 0) {
             s_ctx.time_remaining_ms = i_val * 1000;
             ESP_LOGI(TAG, "Time set: %d sec", i_val);
             snprintf(response, response_size, "{\"ok\":true,\"time\":%d}", i_val);

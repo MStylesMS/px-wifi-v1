@@ -34,6 +34,13 @@ def ensure(condition, message):
         raise RuntimeError(message)
 
 
+def assert_time_near(actual, expected, label, tolerance=2):
+    if abs(int(actual) - int(expected)) > tolerance:
+        raise RuntimeError(
+            f"{label}: expected about {expected}s, got {actual}s (tolerance {tolerance}s)"
+        )
+
+
 def request_json_with_retry(method, url, payload=None, timeout=5.0, retries=3, retry_delay=0.75):
     last_exc = None
     for attempt in range(1, retries + 1):
@@ -45,6 +52,48 @@ def request_json_with_retry(method, url, payload=None, timeout=5.0, retries=3, r
                 break
             time.sleep(retry_delay)
     raise last_exc
+
+
+def command_json(base_url, payload, timeout=5.0):
+    status, response = request_json("POST", f"{base_url}/api/command", payload, timeout=timeout)
+    ensure(status == 200, f"command returned HTTP {status}: {payload}")
+    return response
+
+
+def get_state(base_url, timeout=5.0):
+    status, state = request_json("GET", f"{base_url}/api/state", timeout=timeout)
+    ensure(status == 200, f"state returned HTTP {status}")
+    return state
+
+
+def get_config(base_url, timeout=5.0):
+    status, config = request_json("GET", f"{base_url}/api/config", timeout=timeout)
+    ensure(status == 200, f"config returned HTTP {status}")
+    return config
+
+
+def connect_all_inputs(base_url, wire_count):
+    for input_idx in range(1, wire_count + 1):
+        command_json(base_url, {"command": "connect", "input": input_idx})
+
+
+def pause_if_running(base_url):
+    state = get_state(base_url)
+    if state.get("gameState") == "countdown":
+        response = command_json(base_url, {"command": "pause"})
+        ensure(response.get("ok") is True, f"pause failed: {response}")
+
+
+def reset_ready(base_url, wire_count, time_value=None):
+    connect_all_inputs(base_url, wire_count)
+    payload = {"command": "reset"}
+    if time_value is not None:
+        payload["time"] = time_value
+    response = command_json(base_url, payload)
+    ensure(response.get("ok") is True, f"reset failed: {response}")
+    state = get_state(base_url)
+    ensure(state.get("gameState") == "ready", f"expected ready after reset, got {state}")
+    return state
 
 
 def run_smoke(base_url):
@@ -108,6 +157,54 @@ def run_command_flow(base_url):
     print_json("final state", final_state)
 
 
+def run_time_format_flow(base_url):
+    config = get_config(base_url)
+    wire_count = int(config.get("wireCount", 4))
+    time_cases = [
+        (3600, "integer seconds"),
+        ("3600", "digit-string seconds"),
+        ("60:00", "MM:SS string"),
+    ]
+
+    print_step("Time format integration flow")
+
+    for time_value, label in time_cases:
+        print(f"\n-- case: {label} -> {time_value!r} --")
+
+        state = reset_ready(base_url, wire_count, time_value)
+        assert_time_near(state.get("timeRemaining", -1), 3600, f"reset {label}", tolerance=0)
+        print_json(f"reset {label}", state)
+
+        response = command_json(base_url, {"command": "setTime", "time": time_value})
+        ensure(response.get("ok") is True, f"setTime failed for {label}: {response}")
+        state = get_state(base_url)
+        assert_time_near(state.get("timeRemaining", -1), 3600, f"setTime {label}", tolerance=0)
+        ensure(state.get("gameState") == "ready", f"setTime should keep ready state: {state}")
+        print_json(f"setTime {label}", state)
+
+        response = command_json(base_url, {"command": "start", "time": time_value})
+        ensure(response.get("ok") is True, f"start failed for {label}: {response}")
+        state = get_state(base_url)
+        ensure(state.get("gameState") == "countdown", f"start should enter countdown: {state}")
+        assert_time_near(state.get("timeRemaining", -1), 3600, f"start {label}")
+        print_json(f"start {label}", state)
+
+        response = command_json(base_url, {"command": "pause"})
+        ensure(response.get("ok") is True, f"pause failed for {label}: {response}")
+        paused = get_state(base_url)
+        ensure(paused.get("gameState") == "paused", f"pause should enter paused state: {paused}")
+
+        response = command_json(base_url, {"command": "resume", "time": time_value})
+        ensure(response.get("ok") is True, f"resume failed for {label}: {response}")
+        state = get_state(base_url)
+        ensure(state.get("gameState") == "countdown", f"resume should re-enter countdown: {state}")
+        assert_time_near(state.get("timeRemaining", -1), 3600, f"resume {label}")
+        print_json(f"resume {label}", state)
+
+        pause_if_running(base_url)
+        reset_ready(base_url, wire_count)
+
+
 def run_persist_save(base_url):
     payload = {
         "defaultTime": 222,
@@ -151,7 +248,7 @@ def main():
     parser.add_argument("--host", default="192.168.4.1", help="Device host or IP")
     parser.add_argument(
         "--mode",
-        choices=["smoke", "commands", "persist-save", "persist-check", "all"],
+        choices=["smoke", "commands", "time-formats", "persist-save", "persist-check", "all"],
         default="all",
         help="Which test phase to run",
     )
@@ -164,6 +261,8 @@ def main():
             run_smoke(base_url)
         if args.mode in ("commands", "all"):
             run_command_flow(base_url)
+        if args.mode in ("time-formats", "all"):
+            run_time_format_flow(base_url)
         if args.mode == "persist-save":
             run_persist_save(base_url)
         elif args.mode == "persist-check":

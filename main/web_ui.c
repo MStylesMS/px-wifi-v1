@@ -510,6 +510,8 @@ static const char *mqtt_base_topic_or_default(void)
     return s_conn_cfg.mqtt_base_topic[0] != '\0' ? s_conn_cfg.mqtt_base_topic : "site/room/zone";
 }
 
+static const char *prop_led_hint_name_local(prop_led_hint_t hint);
+
 static void mqtt_build_topic(char *out, size_t out_size, const char *suffix)
 {
     snprintf(out, out_size, "%s/%s", mqtt_base_topic_or_default(), suffix);
@@ -576,13 +578,19 @@ static bool mqtt_publish_engine_events(bool publish_state_after)
 
 static void mqtt_publish_announce(void)
 {
-    char announce[768];
+    char announce[1024];
+    char prop_cfg[2048];
     char state_topic[160];
     char commands_topic[160];
     char host[33] = {0};
     char ip_text[32] = "unavailable";
+    char battery_profile[32] = "unknown";
     esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     const esp_app_desc_t *app = esp_app_get_description();
+    int wire_count = 0;
+    int battery_adc_raw = 0;
+    int battery_adc_at_0v = 0;
+    int battery_adc_at_15v = 0;
 
     if (!s_mqtt_client || !s_mqtt_connected || s_conn_cfg.mqtt_prop_announce_topic[0] == '\0') {
         return;
@@ -597,6 +605,15 @@ static void mqtt_publish_announce(void)
 
     mqtt_build_topic(state_topic, sizeof(state_topic), "state");
     mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
+    prop_engine_get_config_json(prop_cfg, sizeof(prop_cfg));
+    (void)json_extract_int_local(prop_cfg, "wireCount", &wire_count);
+    (void)json_extract_int_local(prop_cfg, "batteryAdcRaw", &battery_adc_raw);
+    (void)json_extract_int_local(prop_cfg, "batteryAdcAt0V", &battery_adc_at_0v);
+    (void)json_extract_int_local(prop_cfg, "batteryAdcAt15V", &battery_adc_at_15v);
+    (void)json_extract_string_local(prop_cfg,
+                                    "batteryProfile",
+                                    battery_profile,
+                                    sizeof(battery_profile));
 
     sanitize_network_name(s_conn_cfg.network_name, host, sizeof(host));
     snprintf(announce,
@@ -608,7 +625,14 @@ static void mqtt_publish_announce(void)
              "\"propName\":\"%s\","
              "\"ip\":\"%s\","
              "\"mdns\":\"%s.local\","
+             "\"wireCount\":%d,"
+             "\"batteryAdcRaw\":%d,"
+             "\"batteryAdcAt0V\":%d,"
+             "\"batteryAdcAt15V\":%d,"
+             "\"batteryProfile\":\"%s\","
+             "\"ledHint\":\"%s\","
              "\"version\":\"%s\","
+             "\"buildId\":\"%s\","
              "\"buildDate\":\"%s\","
              "\"buildTime\":\"%s\","
              "\"stateTopic\":\"%s\","
@@ -619,6 +643,13 @@ static void mqtt_publish_announce(void)
              s_prop_id,
              ip_text,
              host,
+             wire_count,
+             battery_adc_raw,
+             battery_adc_at_0v,
+             battery_adc_at_15v,
+             battery_profile,
+             prop_led_hint_name_local(prop_engine_get_led_hint()),
+             app->version,
              app->version,
              app->date,
              app->time,
@@ -697,6 +728,37 @@ static int parse_time_string_to_seconds(const char *text)
     }
 
     return (int)strtol(text, NULL, 10);
+}
+
+static const char *prop_led_hint_name_local(prop_led_hint_t hint)
+{
+    switch (hint) {
+        case PROP_LED_HINT_AP_MODE:
+            return "ap";
+        case PROP_LED_HINT_CONNECTING_WIFI:
+            return "wifi_connecting";
+        case PROP_LED_HINT_CONNECTING_MQTT:
+            return "mqtt_connecting";
+        case PROP_LED_HINT_READY:
+            return "ready";
+        case PROP_LED_HINT_NOT_READY:
+            return "not_ready";
+        case PROP_LED_HINT_COUNTDOWN:
+            return "countdown";
+        case PROP_LED_HINT_PAUSED:
+            return "paused";
+        case PROP_LED_HINT_PENALTY:
+            return "penalty";
+        case PROP_LED_HINT_DETONATED:
+            return "detonated";
+        case PROP_LED_HINT_DEFUSED:
+            return "defused";
+        case PROP_LED_HINT_OTA:
+            return "ota";
+        case PROP_LED_HINT_OFF:
+        default:
+            return "off";
+    }
 }
 
 static void mqtt_publish_follow_event(const char *event,
