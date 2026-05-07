@@ -1,4 +1,5 @@
 #include "web_ui.h"
+#include "web_ui_json.h"
 #include "prop_engine.h"
 
 #include <stdint.h>
@@ -29,6 +30,7 @@ static esp_err_t wifi_connect_sta(const char *ssid, const char *password);
 static bool json_extract_string_local(const char *json, const char *key, char *out, size_t out_size);
 static bool json_extract_int_local(const char *json, const char *key, int *out);
 static bool json_extract_bool_local(const char *json, const char *key, bool *out);
+static void json_escape_string_local(const char *src, char *dst, size_t dst_size);
 static void copy_bounded_local(char *dst, size_t dst_size, const char *src);
 static esp_err_t save_connection_cfg_nvs(void);
 static void mqtt_start_client(void);
@@ -106,21 +108,6 @@ static const static_asset_t ASSET_LOGO = {
     .cache_control = "public, max-age=3600",
 };
 
-typedef struct {
-    char wifi_ssid[33];
-    char wifi_password[65];
-    char mqtt_host[128];
-    int mqtt_port;
-    char mqtt_username[64];
-    char mqtt_password[64];
-    char mqtt_base_topic[96];
-    char mqtt_game_state_topic[128];
-    char mqtt_prop_announce_topic[128];
-    char network_name[33];
-    char ap_password[65];
-    bool ap_enabled;
-} connection_cfg_t;
-
 static char s_prop_id[32] = "px-wifi-v1";
 static bool s_mdns_started;
 static bool s_sta_connecting;
@@ -135,171 +122,19 @@ static char s_sta_ip_text[32] = "";
 static int s_sta_last_disconnect_reason;
 static char s_sta_last_error[48] = "";
 
-#define CONFIG_FILE_PATH "/spiffs/config.json"
-
-static connection_cfg_t s_conn_cfg = {
-    .wifi_ssid = "",
-    .wifi_password = "",
-    .mqtt_host = "",
-    .mqtt_port = 1883,
-    .mqtt_username = "",
-    .mqtt_password = "",
-    .mqtt_base_topic = "site/room/zone",
-    .mqtt_game_state_topic = "site/room/state",
-    .mqtt_prop_announce_topic = "site/props",
-    .network_name = "",
-    .ap_password = "",
-    .ap_enabled = true,
-};
+static connection_cfg_t s_conn_cfg = WEB_UI_CONNECTION_CFG_DEFAULT;
 
 static esp_err_t load_connection_cfg_nvs(void)
 {
-    FILE *f = fopen(CONFIG_FILE_PATH, "r");
-    long size;
-    char *buf;
-    char value[128];
-    int i_val;
-    bool b_val;
-
-    if (!f) {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return ESP_FAIL;
-    }
-    size = ftell(f);
-    if (size <= 0 || size > 8192) {
-        fclose(f);
-        return ESP_ERR_INVALID_SIZE;
-    }
-    rewind(f);
-
-    buf = (char *)calloc(1, (size_t)size + 1);
-    if (!buf) {
-        fclose(f);
-        return ESP_ERR_NO_MEM;
-    }
-    if (fread(buf, 1, (size_t)size, f) != (size_t)size) {
-        free(buf);
-        fclose(f);
-        return ESP_FAIL;
-    }
-    fclose(f);
-
-    if (json_extract_string_local(buf, "wifiSsid", value, sizeof(value))) {
-        strncpy(s_conn_cfg.wifi_ssid, value, sizeof(s_conn_cfg.wifi_ssid) - 1);
-        s_conn_cfg.wifi_ssid[sizeof(s_conn_cfg.wifi_ssid) - 1] = '\0';
-    }
-    if (json_extract_string_local(buf, "wifiPassword", value, sizeof(value))) {
-        strncpy(s_conn_cfg.wifi_password, value, sizeof(s_conn_cfg.wifi_password) - 1);
-        s_conn_cfg.wifi_password[sizeof(s_conn_cfg.wifi_password) - 1] = '\0';
-    }
-    if (json_extract_string_local(buf, "mqttHost", value, sizeof(value))) {
-        strncpy(s_conn_cfg.mqtt_host, value, sizeof(s_conn_cfg.mqtt_host) - 1);
-        s_conn_cfg.mqtt_host[sizeof(s_conn_cfg.mqtt_host) - 1] = '\0';
-    }
-    if (json_extract_int_local(buf, "mqttPort", &i_val) && i_val >= 1 && i_val <= 65535) {
-        s_conn_cfg.mqtt_port = i_val;
-    }
-    if (json_extract_string_local(buf, "mqttUsername", value, sizeof(value))) {
-        strncpy(s_conn_cfg.mqtt_username, value, sizeof(s_conn_cfg.mqtt_username) - 1);
-        s_conn_cfg.mqtt_username[sizeof(s_conn_cfg.mqtt_username) - 1] = '\0';
-    }
-    if (json_extract_string_local(buf, "mqttPassword", value, sizeof(value))) {
-        strncpy(s_conn_cfg.mqtt_password, value, sizeof(s_conn_cfg.mqtt_password) - 1);
-        s_conn_cfg.mqtt_password[sizeof(s_conn_cfg.mqtt_password) - 1] = '\0';
-    }
-    if (json_extract_string_local(buf, "mqttBaseTopic", value, sizeof(value))) {
-        strncpy(s_conn_cfg.mqtt_base_topic, value, sizeof(s_conn_cfg.mqtt_base_topic) - 1);
-        s_conn_cfg.mqtt_base_topic[sizeof(s_conn_cfg.mqtt_base_topic) - 1] = '\0';
-    }
-    if (json_extract_string_local(buf, "mqttGameStateTopic", value, sizeof(value))) {
-        strncpy(s_conn_cfg.mqtt_game_state_topic, value, sizeof(s_conn_cfg.mqtt_game_state_topic) - 1);
-        s_conn_cfg.mqtt_game_state_topic[sizeof(s_conn_cfg.mqtt_game_state_topic) - 1] = '\0';
-    }
-    if (json_extract_string_local(buf, "mqttPropAnnounceTopic", value, sizeof(value)) ||
-        json_extract_string_local(buf, "mqttPropStateTopic", value, sizeof(value))) {
-        strncpy(s_conn_cfg.mqtt_prop_announce_topic, value, sizeof(s_conn_cfg.mqtt_prop_announce_topic) - 1);
-        s_conn_cfg.mqtt_prop_announce_topic[sizeof(s_conn_cfg.mqtt_prop_announce_topic) - 1] = '\0';
-    }
-    if (json_extract_string_local(buf, "networkName", value, sizeof(value))) {
-        strncpy(s_conn_cfg.network_name, value, sizeof(s_conn_cfg.network_name) - 1);
-        s_conn_cfg.network_name[sizeof(s_conn_cfg.network_name) - 1] = '\0';
-    }
-    if (json_extract_string_local(buf, "apPassword", value, sizeof(value))) {
-        strncpy(s_conn_cfg.ap_password, value, sizeof(s_conn_cfg.ap_password) - 1);
-        s_conn_cfg.ap_password[sizeof(s_conn_cfg.ap_password) - 1] = '\0';
-    }
-    if (json_extract_bool_local(buf, "apEnabled", &b_val)) {
-        s_conn_cfg.ap_enabled = b_val;
-    }
-
-    free(buf);
-    return ESP_OK;
+    return web_ui_json_load_connection_cfg(WEB_UI_CONFIG_FILE_PATH, &s_conn_cfg);
 }
 
 static esp_err_t save_connection_cfg_nvs(void)
 {
-    char *prop_cfg = NULL;
-    const char *obj_start;
-    const char *obj_end;
-    FILE *f;
+    char prop_cfg[4096];
 
-    prop_cfg = (char *)calloc(1, 4096);
-    if (!prop_cfg) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    prop_engine_get_config_json(prop_cfg, 4096);
-    obj_start = strchr(prop_cfg, '{');
-    obj_end = strrchr(prop_cfg, '}');
-    if (!obj_start || !obj_end || obj_end <= obj_start) {
-        free(prop_cfg);
-        return ESP_FAIL;
-    }
-
-    f = fopen(CONFIG_FILE_PATH, "w");
-    if (!f) {
-        free(prop_cfg);
-        return ESP_FAIL;
-    }
-
-    fprintf(f,
-            "{\n"
-            "  \"wifiSsid\": \"%s\",\n"
-            "  \"wifiPassword\": \"%s\",\n"
-            "  \"mqttHost\": \"%s\",\n"
-            "  \"mqttPort\": %d,\n"
-            "  \"mqttUsername\": \"%s\",\n"
-            "  \"mqttPassword\": \"%s\",\n"
-            "  \"mqttBaseTopic\": \"%s\",\n"
-            "  \"mqttGameStateTopic\": \"%s\",\n"
-            "  \"mqttPropAnnounceTopic\": \"%s\",\n"
-            "  \"networkName\": \"%s\",\n"
-            "  \"apPassword\": \"%s\",\n"
-            "  \"apEnabled\": %s,\n"
-            "  %.*s\n"
-            "}\n",
-            s_conn_cfg.wifi_ssid,
-            s_conn_cfg.wifi_password,
-            s_conn_cfg.mqtt_host,
-            s_conn_cfg.mqtt_port,
-            s_conn_cfg.mqtt_username,
-            s_conn_cfg.mqtt_password,
-            s_conn_cfg.mqtt_base_topic,
-            s_conn_cfg.mqtt_game_state_topic,
-            s_conn_cfg.mqtt_prop_announce_topic,
-            s_conn_cfg.network_name,
-            s_conn_cfg.ap_password,
-            s_conn_cfg.ap_enabled ? "true" : "false",
-            (int)(obj_end - obj_start - 1),
-            obj_start + 1);
-
-    fclose(f);
-    free(prop_cfg);
-    return ESP_OK;
+    prop_engine_get_config_json(prop_cfg, sizeof(prop_cfg));
+    return web_ui_json_save_connection_cfg(WEB_UI_CONFIG_FILE_PATH, &s_conn_cfg, prop_cfg);
 }
 
 static void sanitize_network_name(const char *src, char *out, size_t out_size)
@@ -404,95 +239,90 @@ static esp_err_t read_request_body(httpd_req_t *req, char *buf, size_t buf_size)
 
 static bool json_extract_string_local(const char *json, const char *key, char *out, size_t out_size)
 {
-    char key_pat[48];
-    const char *p;
-    const char *q;
-    size_t len;
-
-    snprintf(key_pat, sizeof(key_pat), "\"%s\"", key);
-    p = strstr(json, key_pat);
-    if (!p) {
-        return false;
-    }
-
-    p = strchr(p, ':');
-    if (!p) {
-        return false;
-    }
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
-        p++;
-    }
-    if (*p != '"') {
-        return false;
-    }
-    p++;
-    q = strchr(p, '"');
-    if (!q) {
-        return false;
-    }
-
-    len = (size_t)(q - p);
-    if (len >= out_size) {
-        len = out_size - 1;
-    }
-    memcpy(out, p, len);
-    out[len] = '\0';
-    return true;
+    return web_ui_json_extract_string(json, key, out, out_size);
 }
 
 static bool json_extract_int_local(const char *json, const char *key, int *out)
 {
-    char key_pat[48];
-    const char *p;
-
-    snprintf(key_pat, sizeof(key_pat), "\"%s\"", key);
-    p = strstr(json, key_pat);
-    if (!p) {
-        return false;
-    }
-
-    p = strchr(p, ':');
-    if (!p) {
-        return false;
-    }
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
-        p++;
-    }
-
-    *out = (int)strtol(p, NULL, 10);
-    return true;
+    return web_ui_json_extract_int(json, key, out);
 }
 
 static bool json_extract_bool_local(const char *json, const char *key, bool *out)
 {
-    char key_pat[48];
-    const char *p;
+    return web_ui_json_extract_bool(json, key, out);
+}
 
-    snprintf(key_pat, sizeof(key_pat), "\"%s\"", key);
-    p = strstr(json, key_pat);
-    if (!p) {
-        return false;
+static void json_escape_string_local(const char *src, char *dst, size_t dst_size)
+{
+    static const char hex[] = "0123456789abcdef";
+    size_t w = 0;
+
+    if (!dst || dst_size == 0) {
+        return;
     }
 
-    p = strchr(p, ':');
-    if (!p) {
-        return false;
+    if (!src) {
+        dst[0] = '\0';
+        return;
     }
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
-        p++;
+
+    for (size_t i = 0; src[i] != '\0' && w + 1 < dst_size; ++i) {
+        unsigned char c = (unsigned char)src[i];
+        const char *escape = NULL;
+
+        switch (c) {
+            case '"':
+                escape = "\\\"";
+                break;
+            case '\\':
+                escape = "\\\\";
+                break;
+            case '\b':
+                escape = "\\b";
+                break;
+            case '\f':
+                escape = "\\f";
+                break;
+            case '\n':
+                escape = "\\n";
+                break;
+            case '\r':
+                escape = "\\r";
+                break;
+            case '\t':
+                escape = "\\t";
+                break;
+            default:
+                break;
+        }
+
+        if (escape) {
+            size_t escape_len = strlen(escape);
+            if (w + escape_len >= dst_size) {
+                break;
+            }
+            memcpy(dst + w, escape, escape_len);
+            w += escape_len;
+            continue;
+        }
+
+        if (c < 0x20) {
+            if (w + 6 >= dst_size) {
+                break;
+            }
+            dst[w++] = '\\';
+            dst[w++] = 'u';
+            dst[w++] = '0';
+            dst[w++] = '0';
+            dst[w++] = hex[(c >> 4) & 0x0F];
+            dst[w++] = hex[c & 0x0F];
+            continue;
+        }
+
+        dst[w++] = (char)c;
     }
-    if (strncmp(p, "true", 4) == 0) {
-        *out = true;
-        return true;
-    }
-    if (strncmp(p, "false", 5) == 0) {
-        *out = false;
-        return true;
-    }
-    return false;
+
+    dst[w] = '\0';
 }
 
 static void copy_bounded_local(char *dst, size_t dst_size, const char *src)
@@ -668,18 +498,20 @@ static void mqtt_publish_warning(const char *message)
 {
     char payload[384];
     char topic[160];
+    char warning_json[193];
 
     if (!s_mqtt_client || !s_mqtt_connected) {
         return;
     }
 
     mqtt_build_topic(topic, sizeof(topic), "warnings");
+    json_escape_string_local(message ? message : "unknown", warning_json, sizeof(warning_json));
 
     snprintf(payload,
              sizeof(payload),
              "{\"ts\":%lld,\"warning\":\"%s\"}",
              (long long)(esp_timer_get_time() / 1000),
-             message ? message : "unknown");
+             warning_json);
     esp_mqtt_client_publish(s_mqtt_client, topic, payload, 0, 1, 0);
 }
 
@@ -808,6 +640,8 @@ static void mqtt_apply_follower_payload(const char *payload, int payload_len)
     int tolerance_ms = 1000;
     int local_remaining_s = -1;
     int remote_remaining_s = -1;
+    cJSON *remote_root = NULL;
+    cJSON *local_root = NULL;
 
     if (!payload || payload_len <= 0) {
         return;
@@ -824,23 +658,32 @@ static void mqtt_apply_follower_payload(const char *payload, int payload_len)
     memcpy(msg, payload, (size_t)payload_len);
     msg[payload_len] = '\0';
 
-    if (!json_extract_int_local(msg, "timeRemaining", &remote_remaining_s)) {
-        if (json_extract_string_local(msg, "remaining_time", remaining_text, sizeof(remaining_text))) {
+    remote_root = web_ui_json_parse(msg);
+    if (!remote_root) {
+        return;
+    }
+
+    if (!web_ui_json_get_int(remote_root, "timeRemaining", &remote_remaining_s)) {
+        if (web_ui_json_get_string(remote_root, "remaining_time", remaining_text, sizeof(remaining_text))) {
             remote_remaining_s = parse_time_string_to_seconds(remaining_text);
         }
     }
     if (remote_remaining_s < 0) {
+        cJSON_Delete(remote_root);
         return;
     }
 
-    (void)json_extract_bool_local(msg, "gamePaused", &game_paused);
-    has_pause = strstr(msg, "\"gamePaused\"") != NULL;
-    (void)json_extract_string_local(msg, "gameMode", game_mode, sizeof(game_mode));
-    (void)json_extract_string_local(msg, "state", game_state, sizeof(game_state));
+    (void)web_ui_json_get_bool(remote_root, "gamePaused", &game_paused);
+    has_pause = web_ui_json_has_key(remote_root, "gamePaused");
+    (void)web_ui_json_get_string(remote_root, "gameMode", game_mode, sizeof(game_mode));
+    (void)web_ui_json_get_string(remote_root, "state", game_state, sizeof(game_state));
 
     prop_engine_get_state_json(local_state_json, sizeof(local_state_json));
-    (void)json_extract_int_local(local_state_json, "timeRemaining", &local_remaining_s);
-    (void)json_extract_string_local(local_state_json, "gameState", local_state, sizeof(local_state));
+    local_root = web_ui_json_parse(local_state_json);
+    if (local_root) {
+        (void)web_ui_json_get_int(local_root, "timeRemaining", &local_remaining_s);
+        (void)web_ui_json_get_string(local_root, "gameState", local_state, sizeof(local_state));
+    }
 
     if (local_remaining_s >= 0 &&
         abs((local_remaining_s - remote_remaining_s) * 1000) > tolerance_ms) {
@@ -874,6 +717,8 @@ static void mqtt_apply_follower_payload(const char *payload, int payload_len)
     }
 
     mqtt_publish_state(true);
+    cJSON_Delete(local_root);
+    cJSON_Delete(remote_root);
 }
 
 static void mqtt_handle_command_payload(const char *payload, int payload_len)
@@ -887,6 +732,8 @@ static void mqtt_handle_command_payload(const char *payload, int payload_len)
     bool has_warning_message = false;
     char events_topic[160];
     int copy_len;
+    cJSON *cmd_root = NULL;
+    cJSON *response_root = NULL;
 
     if (!payload || payload_len <= 0) {
         return;
@@ -898,16 +745,20 @@ static void mqtt_handle_command_payload(const char *payload, int payload_len)
     }
     memcpy(cmd_json, payload, (size_t)copy_len);
     cmd_json[copy_len] = '\0';
-    (void)json_extract_string_local(cmd_json, "command", command_name, sizeof(command_name));
+    cmd_root = web_ui_json_parse(cmd_json);
+    if (cmd_root) {
+        (void)web_ui_json_get_string(cmd_root, "command", command_name, sizeof(command_name));
+    }
 
     if (prop_engine_handle_command_json(cmd_json, response, sizeof(response)) == ESP_OK) {
         mqtt_build_topic(events_topic, sizeof(events_topic), "events");
         esp_mqtt_client_publish(s_mqtt_client, events_topic, response, 0, 1, 0);
-        has_warning_message = json_extract_string_local(response, "message", warning_message, sizeof(warning_message));
+        response_root = web_ui_json_parse(response);
+        has_warning_message = web_ui_json_get_string(response_root, "message", warning_message, sizeof(warning_message));
         if (!has_warning_message) {
-            has_error_message = json_extract_string_local(response, "error", warning_message, sizeof(warning_message));
+            has_error_message = web_ui_json_get_string(response_root, "error", warning_message, sizeof(warning_message));
         }
-        if ((json_extract_bool_local(response, "ok", &ok) && !ok) || has_error_message || has_warning_message) {
+        if ((web_ui_json_get_bool(response_root, "ok", &ok) && !ok) || has_error_message || has_warning_message) {
             if (!warning_message[0]) {
                 snprintf(warning_message, sizeof(warning_message), "command_rejected");
             }
@@ -916,12 +767,16 @@ static void mqtt_handle_command_payload(const char *payload, int payload_len)
         if (!mqtt_publish_engine_events(true)) {
             mqtt_publish_state(true);
         }
-        if (strcmp(command_name, "reboot") == 0 && (!json_extract_bool_local(response, "ok", &ok) || ok)) {
+        if (strcmp(command_name, "reboot") == 0 && (!web_ui_json_get_bool(response_root, "ok", &ok) || ok)) {
             xTaskCreate(ota_reboot_task, "cmd_reboot", 2048, NULL, 5, NULL);
         }
+        cJSON_Delete(response_root);
+        cJSON_Delete(cmd_root);
         return;
     }
 
+    cJSON_Delete(response_root);
+    cJSON_Delete(cmd_root);
     mqtt_publish_warning("command_handle_failed");
 }
 
@@ -1351,77 +1206,32 @@ static esp_err_t state_get_handler(httpd_req_t *req)
 
 static void build_unified_config_json(char *out, size_t out_size)
 {
-    char *prop_payload = NULL;
+    char prop_payload[4096];
+    char *payload = NULL;
     char commands_topic[160];
     char state_topic[160];
     char events_topic[160];
     char warnings_topic[160];
-    const char *obj_start;
-    const char *obj_end;
-
-    prop_payload = (char *)calloc(1, 4096);
-    if (!prop_payload) {
-        snprintf(out, out_size, "{}");
-        return;
-    }
-
-    prop_engine_get_config_json(prop_payload, 4096);
-    obj_start = strchr(prop_payload, '{');
-    obj_end = strrchr(prop_payload, '}');
-    if (!obj_start || !obj_end || obj_end <= obj_start) {
-        free(prop_payload);
-        snprintf(out, out_size, "{}");
-        return;
-    }
+    prop_engine_get_config_json(prop_payload, sizeof(prop_payload));
 
     mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
     mqtt_build_topic(state_topic, sizeof(state_topic), "state");
     mqtt_build_topic(events_topic, sizeof(events_topic), "events");
     mqtt_build_topic(warnings_topic, sizeof(warnings_topic), "warnings");
 
-    snprintf(out,
-             out_size,
-             "{"
-             "\"wifiSsid\":\"%s\","
-             "\"wifiPassword\":\"%s\","
-             "\"mqttHost\":\"%s\","
-             "\"mqttPort\":%d,"
-             "\"mqttUsername\":\"%s\","
-             "\"mqttPassword\":\"%s\","
-             "\"mqttBaseTopic\":\"%s\","
-             "\"mqttCommandTopic\":\"%s\","
-             "\"mqttStateTopic\":\"%s\","
-             "\"mqttEventsTopic\":\"%s\","
-             "\"mqttWarningsTopic\":\"%s\","
-             "\"mqttGameStateTopic\":\"%s\","
-             "\"mqttPropAnnounceTopic\":\"%s\","
-             "\"mqttPropStateTopic\":\"%s\","
-             "\"networkName\":\"%s\","
-             "\"apPassword\":\"%s\","
-             "\"apEnabled\":%s,"
-             "%.*s"
-             "}",
-             s_conn_cfg.wifi_ssid,
-             s_conn_cfg.wifi_password,
-             s_conn_cfg.mqtt_host,
-             s_conn_cfg.mqtt_port,
-             s_conn_cfg.mqtt_username,
-             s_conn_cfg.mqtt_password,
-             s_conn_cfg.mqtt_base_topic,
-             commands_topic,
-             state_topic,
-             events_topic,
-             warnings_topic,
-             s_conn_cfg.mqtt_game_state_topic,
-             s_conn_cfg.mqtt_prop_announce_topic,
-             s_conn_cfg.mqtt_prop_announce_topic,
-             s_conn_cfg.network_name,
-             s_conn_cfg.ap_password,
-             s_conn_cfg.ap_enabled ? "true" : "false",
-             (int)(obj_end - obj_start - 1),
-             obj_start + 1);
+    payload = web_ui_json_build_unified_config_payload(&s_conn_cfg,
+                                                       commands_topic,
+                                                       state_topic,
+                                                       events_topic,
+                                                       warnings_topic,
+                                                       prop_payload);
+    if (!payload) {
+        snprintf(out, out_size, "{}");
+        return;
+    }
 
-    free(prop_payload);
+    copy_bounded_local(out, out_size, payload);
+    cJSON_free(payload);
 }
 
 static esp_err_t config_get_handler(httpd_req_t *req)
@@ -1552,6 +1362,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     char value[128];
     bool persist = strstr(req->uri, "/save") != NULL;
     esp_err_t status = ESP_OK;
+    cJSON *root = NULL;
 
     body = (char *)calloc(1, (size_t)req->content_len + 1);
     if (!body) {
@@ -1565,50 +1376,57 @@ static esp_err_t config_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    root = web_ui_json_parse(body);
+    if (!root) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
     ESP_ERROR_CHECK(prop_engine_apply_config_json(body, false, response, sizeof(response)));
 
-    if (json_extract_string_local(body, "wifiSsid", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "wifiSsid", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.wifi_ssid, sizeof(s_conn_cfg.wifi_ssid), value);
     }
-    if (json_extract_string_local(body, "wifiPassword", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "wifiPassword", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.wifi_password, sizeof(s_conn_cfg.wifi_password), value);
     }
-    if (json_extract_string_local(body, "mqttHost", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttHost", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_host, sizeof(s_conn_cfg.mqtt_host), value);
     }
-    if (json_extract_int_local(body, "mqttPort", &s_conn_cfg.mqtt_port)) {
+    if (web_ui_json_get_int(root, "mqttPort", &s_conn_cfg.mqtt_port)) {
         if (s_conn_cfg.mqtt_port < 1 || s_conn_cfg.mqtt_port > 65535) {
             s_conn_cfg.mqtt_port = 1883;
         }
     }
-    if (json_extract_string_local(body, "mqttUsername", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttUsername", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_username, sizeof(s_conn_cfg.mqtt_username), value);
     }
-    if (json_extract_string_local(body, "mqttPassword", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttPassword", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_password, sizeof(s_conn_cfg.mqtt_password), value);
     }
-    if (json_extract_string_local(body, "mqttBaseTopic", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttBaseTopic", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_base_topic, sizeof(s_conn_cfg.mqtt_base_topic), value);
     }
-    if (json_extract_string_local(body, "mqttGameStateTopic", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttGameStateTopic", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_game_state_topic, sizeof(s_conn_cfg.mqtt_game_state_topic), value);
     }
-    if (json_extract_string_local(body, "mqttPropAnnounceTopic", value, sizeof(value)) ||
-        json_extract_string_local(body, "mqttPropStateTopic", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttPropAnnounceTopic", value, sizeof(value)) ||
+        web_ui_json_get_string(root, "mqttPropStateTopic", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_prop_announce_topic,
                            sizeof(s_conn_cfg.mqtt_prop_announce_topic),
                            value);
     }
-    if (json_extract_string_local(body, "networkName", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "networkName", value, sizeof(value))) {
         sanitize_network_name(value, s_conn_cfg.network_name, sizeof(s_conn_cfg.network_name));
         (void)apply_mdns_hostname();
     }
-    if (json_extract_string_local(body, "apPassword", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "apPassword", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.ap_password, sizeof(s_conn_cfg.ap_password), value);
     }
     {
         bool ap_val;
-        if (json_extract_bool_local(body, "apEnabled", &ap_val)) {
+        if (web_ui_json_get_bool(root, "apEnabled", &ap_val)) {
             s_conn_cfg.ap_enabled = ap_val;
         }
     }
@@ -1624,6 +1442,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     status = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    cJSON_Delete(root);
     free(body);
     return status;
 }
@@ -1646,7 +1465,7 @@ static esp_err_t config_restore_post_handler(httpd_req_t *req)
 
 static esp_err_t connection_get_handler(httpd_req_t *req)
 {
-    char payload[2048];
+    char *payload;
     char commands_topic[160];
     char state_topic[160];
     char events_topic[160];
@@ -1672,51 +1491,22 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
         snprintf(ap_ssid, sizeof(ap_ssid), "%s", (const char *)ap_cfg.ap.ssid);
     }
 
-    snprintf(payload,
-             sizeof(payload),
-             "{"
-             "\"wifiSsid\":\"%s\","
-             "\"wifiPassword\":\"%s\","
-             "\"mqttHost\":\"%s\","
-             "\"mqttPort\":%d,"
-             "\"mqttUsername\":\"%s\","
-             "\"mqttPassword\":\"%s\","
-             "\"mqttBaseTopic\":\"%s\","
-             "\"mqttCommandTopic\":\"%s\","
-             "\"mqttStateTopic\":\"%s\","
-             "\"mqttEventsTopic\":\"%s\","
-             "\"mqttWarningsTopic\":\"%s\","
-             "\"mqttGameStateTopic\":\"%s\","
-             "\"mqttPropAnnounceTopic\":\"%s\"," 
-             "\"mqttPropStateTopic\":\"%s\"," 
-             "\"networkName\":\"%s\","
-             "\"apSsid\":\"%s\","
-             "\"apPassword\":\"%s\","
-             "\"apIpAddress\":\"%s\","
-             "\"apEnabled\":%s"
-             "}",
-             s_conn_cfg.wifi_ssid,
-             s_conn_cfg.wifi_password,
-             s_conn_cfg.mqtt_host,
-             s_conn_cfg.mqtt_port,
-             s_conn_cfg.mqtt_username,
-             s_conn_cfg.mqtt_password,
-             s_conn_cfg.mqtt_base_topic,
-             commands_topic,
-             state_topic,
-             events_topic,
-             warnings_topic,
-             s_conn_cfg.mqtt_game_state_topic,
-             s_conn_cfg.mqtt_prop_announce_topic,
-             s_conn_cfg.mqtt_prop_announce_topic,
-             s_conn_cfg.network_name,
-             ap_ssid,
-             s_conn_cfg.ap_password,
-             ap_ip_text,
-             s_conn_cfg.ap_enabled ? "true" : "false");
+    payload = web_ui_json_build_connection_payload(&s_conn_cfg,
+                                                   commands_topic,
+                                                   state_topic,
+                                                   events_topic,
+                                                   warnings_topic,
+                                                   ap_ssid,
+                                                   ap_ip_text);
+    if (!payload) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+    esp_err_t err = httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+    cJSON_free(payload);
+    return err;
 }
 
 static esp_err_t connection_post_handler(httpd_req_t *req)
@@ -1728,6 +1518,7 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
     bool wifi_ssid_updated = false;
     bool wifi_password_updated = false;
     esp_err_t status = ESP_OK;
+    cJSON *root = NULL;
 
     body = (char *)calloc(1, (size_t)req->content_len + 1);
     if (!body) {
@@ -1741,14 +1532,21 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    root = web_ui_json_parse(body);
+    if (!root) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
     copy_bounded_local(new_wifi_ssid, sizeof(new_wifi_ssid), s_conn_cfg.wifi_ssid);
     copy_bounded_local(new_wifi_password, sizeof(new_wifi_password), s_conn_cfg.wifi_password);
 
-    if (json_extract_string_local(body, "wifiSsid", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "wifiSsid", value, sizeof(value))) {
         copy_bounded_local(new_wifi_ssid, sizeof(new_wifi_ssid), value);
         wifi_ssid_updated = true;
     }
-    if (json_extract_string_local(body, "wifiPassword", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "wifiPassword", value, sizeof(value))) {
         copy_bounded_local(new_wifi_password, sizeof(new_wifi_password), value);
         wifi_password_updated = true;
     }
@@ -1780,6 +1578,7 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
                      "{\"ok\":false,\"applied\":false,\"error\":\"%s\"}",
                      validation_error);
             status = httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+            cJSON_Delete(root);
             free(body);
             return status;
         }
@@ -1787,42 +1586,42 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
         copy_bounded_local(s_conn_cfg.wifi_ssid, sizeof(s_conn_cfg.wifi_ssid), new_wifi_ssid);
         copy_bounded_local(s_conn_cfg.wifi_password, sizeof(s_conn_cfg.wifi_password), new_wifi_password);
     }
-    if (json_extract_string_local(body, "mqttHost", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttHost", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_host, sizeof(s_conn_cfg.mqtt_host), value);
     }
-    if (json_extract_int_local(body, "mqttPort", &s_conn_cfg.mqtt_port)) {
+    if (web_ui_json_get_int(root, "mqttPort", &s_conn_cfg.mqtt_port)) {
         if (s_conn_cfg.mqtt_port < 1 || s_conn_cfg.mqtt_port > 65535) {
             s_conn_cfg.mqtt_port = 1883;
         }
     }
-    if (json_extract_string_local(body, "mqttUsername", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttUsername", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_username, sizeof(s_conn_cfg.mqtt_username), value);
     }
-    if (json_extract_string_local(body, "mqttPassword", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttPassword", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_password, sizeof(s_conn_cfg.mqtt_password), value);
     }
-    if (json_extract_string_local(body, "mqttBaseTopic", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttBaseTopic", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_base_topic, sizeof(s_conn_cfg.mqtt_base_topic), value);
     }
-    if (json_extract_string_local(body, "mqttGameStateTopic", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttGameStateTopic", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_game_state_topic, sizeof(s_conn_cfg.mqtt_game_state_topic), value);
     }
-    if (json_extract_string_local(body, "mqttPropAnnounceTopic", value, sizeof(value)) ||
-        json_extract_string_local(body, "mqttPropStateTopic", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "mqttPropAnnounceTopic", value, sizeof(value)) ||
+        web_ui_json_get_string(root, "mqttPropStateTopic", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.mqtt_prop_announce_topic,
                            sizeof(s_conn_cfg.mqtt_prop_announce_topic),
                            value);
     }
-    if (json_extract_string_local(body, "networkName", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "networkName", value, sizeof(value))) {
         sanitize_network_name(value, s_conn_cfg.network_name, sizeof(s_conn_cfg.network_name));
         (void)apply_mdns_hostname();
     }
-    if (json_extract_string_local(body, "apPassword", value, sizeof(value))) {
+    if (web_ui_json_get_string(root, "apPassword", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.ap_password, sizeof(s_conn_cfg.ap_password), value);
     }
     {
         bool ap_val;
-        if (json_extract_bool_local(body, "apEnabled", &ap_val)) {
+        if (web_ui_json_get_bool(root, "apEnabled", &ap_val)) {
             s_conn_cfg.ap_enabled = ap_val;
         }
     }
@@ -1854,6 +1653,7 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
                  "{\"ok\":false,\"applied\":true,\"connecting\":false,\"error\":\"%s\"}",
                  esp_err_to_name(wifi_ret));
         status = httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+        cJSON_Delete(root);
         free(body);
         return status;
     }
@@ -1861,6 +1661,7 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
                                 connect_attempted
                                     ? "{\"ok\":true,\"applied\":true,\"connecting\":true}"
                                     : "{\"ok\":true,\"applied\":true,\"connecting\":false}");
+    cJSON_Delete(root);
     free(body);
     return status;
 }
@@ -1888,7 +1689,7 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     (void)json_extract_int_local(state_json, "battery", &battery);
     (void)json_extract_string_local(state_json, "gameState", game_state, sizeof(game_state));
 
-    char payload[1024];
+    char *payload;
     char wifi_ssid_json[64] = "";
     int wifi_rssi = 0;
     bool wifi_connected = false;
@@ -1905,58 +1706,41 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
         }
     }
 
-    snprintf(payload,
-             sizeof(payload),
-             "{"
-             "\"propName\":\"%s\","
-             "\"ipAddress\":\"%s\","
-             "\"softwareVersion\":\"%s\","
-             "\"buildNumber\":\"%s\","
-             "\"buildDate\":\"%s %s\","
-             "\"cpuTempC\":null,"
-             "\"freeMemoryBytes\":%lld,"
-             "\"batteryPercent\":%d,"
-             "\"networkName\":\"%s\","
-             "\"status\":\"%s\","
-             "\"apIpAddress\":\"%s\","
-             "\"wifiConnected\":%s,"
-             "\"wifiConnecting\":%s,"
-             "\"wifiTargetSsid\":\"%s\","
-             "\"wifiSsid\":\"%s\","
-             "\"wifiRssi\":%d,"
-             "\"wifiLastError\":\"%s\","
-             "\"wifiLastErrorCode\":%d,"
-             "\"pendingApShutdown\":%s"
-             "}",
-             s_prop_id,
-             ip_text,
-             app->version,
-             app->version,
-             app->date,
-             app->time,
-             (long long)free_heap,
-             battery,
-             s_conn_cfg.network_name,
-             game_state,
-             ap_ip_text,
-             wifi_connected ? "true" : "false",
-             s_sta_connecting ? "true" : "false",
-             s_conn_cfg.wifi_ssid,
-             wifi_ssid_json,
-             wifi_rssi,
-             s_sta_last_error,
-             s_sta_last_disconnect_reason,
-             s_ap_shutdown_pending ? "true" : "false");
+    payload = web_ui_json_build_device_details_payload(s_prop_id,
+                                                       ip_text,
+                                                       app->version,
+                                                       app->version,
+                                                       app->date,
+                                                       app->time,
+                                                       free_heap,
+                                                       battery,
+                                                       s_conn_cfg.network_name,
+                                                       game_state,
+                                                       ap_ip_text,
+                                                       wifi_connected,
+                                                       s_sta_connecting,
+                                                       s_conn_cfg.wifi_ssid,
+                                                       wifi_ssid_json,
+                                                       wifi_rssi,
+                                                       s_sta_last_error,
+                                                       s_sta_last_disconnect_reason,
+                                                       s_ap_shutdown_pending);
+    if (!payload) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+    esp_err_t err = httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+    cJSON_free(payload);
+    return err;
 }
 
 static esp_err_t device_name_post_handler(httpd_req_t *req)
 {
     char body[256];
     char name_in[64];
-    char response[256];
+    char *response;
 
     if (read_request_body(req, body, sizeof(body)) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
@@ -1971,14 +1755,16 @@ static esp_err_t device_name_post_handler(httpd_req_t *req)
     sanitize_network_name(name_in, s_conn_cfg.network_name, sizeof(s_conn_cfg.network_name));
     (void)apply_mdns_hostname();
 
-    snprintf(response,
-             sizeof(response),
-             "{\"ok\":true,\"networkName\":\"%s\",\"url\":\"http://%s.local\"}",
-             s_conn_cfg.network_name,
-             s_conn_cfg.network_name);
+    response = web_ui_json_build_device_name_payload(s_conn_cfg.network_name);
+    if (!response) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    esp_err_t err = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    cJSON_free(response);
+    return err;
 }
 
 static esp_err_t connection_scan_get_handler(httpd_req_t *req)

@@ -11,8 +11,6 @@
 #include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
-#include "soc/gpio_reg.h"
-#include "soc/io_mux_reg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -196,13 +194,14 @@ static esp_err_t init_wire_inputs(void)
 {
     esp_err_t err;
 
-    /* Reset pins from any default IOMUX functions first */
     for (int i = 0; i < 8; ++i) {
         err = gpio_reset_pin(s_wire_input_gpios[i]);
-        ESP_LOGI(TAG, "gpio_reset_pin(%d) = %s", s_wire_input_gpios[i], esp_err_to_name(err));
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "gpio_reset_pin(%d) failed: %s", s_wire_input_gpios[i], esp_err_to_name(err));
+            return err;
+        }
     }
 
-    /* Configure each pin individually so we can log per-pin results */
     for (int i = 0; i < 8; ++i) {
         gpio_config_t io_cfg = {
             .pin_bit_mask = (1ULL << s_wire_input_gpios[i]),
@@ -212,55 +211,13 @@ static esp_err_t init_wire_inputs(void)
             .intr_type = GPIO_INTR_DISABLE,
         };
         err = gpio_config(&io_cfg);
-        int level = gpio_get_level(s_wire_input_gpios[i]);
-        ESP_LOGI(TAG, "gpio_config GPIO %d: %s, level=%d", s_wire_input_gpios[i], esp_err_to_name(err), level);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "gpio_config(%d) failed: %s", s_wire_input_gpios[i], esp_err_to_name(err));
+            return err;
+        }
     }
 
-    /* Test: flip to pull-down to prove config takes effect */
-    for (int i = 0; i < 4; ++i) {
-        gpio_set_pull_mode(s_wire_input_gpios[i], GPIO_PULLDOWN_ONLY);
-        vTaskDelay(pdMS_TO_TICKS(5));
-        int level_pd = gpio_get_level(s_wire_input_gpios[i]);
-        /* Restore pull-up */
-        gpio_set_pull_mode(s_wire_input_gpios[i], GPIO_PULLUP_ONLY);
-        vTaskDelay(pdMS_TO_TICKS(5));
-        int level_pu = gpio_get_level(s_wire_input_gpios[i]);
-        ESP_LOGI(TAG, "GPIO %d: pull-down→%d, pull-up→%d", s_wire_input_gpios[i], level_pd, level_pu);
-    }
-
-    /* Test: drive GPIO 4-7 as outputs LOW, read back, then restore to input */
-    ESP_LOGW(TAG, "=== OUTPUT DRIVE TEST (driving LOW) ===");
-    for (int i = 0; i < 4; ++i) {
-        gpio_num_t pin = s_wire_input_gpios[i];
-        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
-        gpio_set_level(pin, 0);
-        vTaskDelay(pdMS_TO_TICKS(5));
-        /* Read raw register to see if output took effect */
-        uint32_t gpio_in = REG_READ(GPIO_IN_REG);
-        int bit = (gpio_in >> pin) & 1;
-        ESP_LOGW(TAG, "GPIO %d: output LOW → raw bit=%d", pin, bit);
-        /* Now drive HIGH */
-        gpio_set_level(pin, 1);
-        vTaskDelay(pdMS_TO_TICKS(5));
-        gpio_in = REG_READ(GPIO_IN_REG);
-        bit = (gpio_in >> pin) & 1;
-        ESP_LOGW(TAG, "GPIO %d: output HIGH → raw bit=%d", pin, bit);
-        /* Restore to input with pull-up */
-        gpio_set_direction(pin, GPIO_MODE_INPUT);
-        gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY);
-    }
-
-    /* Read IO_MUX register for GPIO 5,6,7 to check routing */
-    ESP_LOGW(TAG, "=== IO_MUX REGISTER DUMP ===");
-    for (int i = 0; i < 4; ++i) {
-        gpio_num_t pin = s_wire_input_gpios[i];
-        /* IO_MUX registers are at IO_MUX_GPIO0_REG + pin*4 */
-        uint32_t iomux_reg = REG_READ(IO_MUX_GPIO0_REG + pin * 4);
-        uint32_t gpio_func = REG_READ(GPIO_FUNC0_OUT_SEL_CFG_REG + pin * 4);
-        ESP_LOGW(TAG, "GPIO %d: IO_MUX=0x%08lx, GPIO_FUNCx_OUT_SEL=0x%08lx",
-                 pin, (unsigned long)iomux_reg, (unsigned long)gpio_func);
-    }
-
+    ESP_LOGI(TAG, "Configured %d wire inputs with pull-ups", 8);
     return ESP_OK;
 }
 
@@ -1781,12 +1738,6 @@ esp_err_t prop_engine_init(void)
         if (level == 0) {
             s_ctx.connected_mask |= (uint8_t)(1u << i);
         }
-    }
-    /* Also dump raw GPIO IN registers for diagnosis */
-    {
-        volatile uint32_t *gpio_in = (volatile uint32_t *)0x6000403C;  /* GPIO_IN_REG */
-        volatile uint32_t *gpio_in1 = (volatile uint32_t *)0x60004040; /* GPIO_IN1_REG */
-        ESP_LOGI(TAG, "GPIO_IN_REG=0x%08lX  GPIO_IN1_REG=0x%08lX", (unsigned long)*gpio_in, (unsigned long)*gpio_in1);
     }
     ESP_LOGI(TAG, "Initial connected_mask=0x%02X (wire_count=%d)", (unsigned)s_ctx.connected_mask, s_ctx.cfg.wire_count);
     s_ctx.time_remaining_ms = s_ctx.cfg.default_time_s * 1000;
