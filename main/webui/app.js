@@ -82,6 +82,7 @@
                 battery: 100,
                 batteryVoltageMv: 5200,
                 batteryProfile: "unknown",
+                batteryState: "normal",
                 lowBattery: false,
                 version: "demo",
                 buildId: "demo-local"
@@ -127,6 +128,9 @@
                     cpuTempC: null,
                     freeMemoryBytes: 243712,
                     batteryPercent: 100,
+                    batteryState: "normal",
+                    batteryVoltageMv: 5200,
+                    lowBattery: false,
                     networkName: "px-wifi-v1-a1b2",
                     apSsid: "Paradox-PXWiFiV1-A1B2",
                     status: "ready",
@@ -219,27 +223,77 @@
         node.textContent = `[${nowIso()}]\n${JSON.stringify(value, null, 2)}\n\n` + node.textContent;
     }
 
+    const BATTERY_COLOR_HEX = {
+        good: "#2f8f74",
+        warn: "#b57500",
+        bad: "#b23a3a"
+    };
+
+    function batteryTier(percent) {
+        if (percent >= 60) {
+            return "good";
+        }
+        if (percent >= 40) {
+            return "warn";
+        }
+        return "bad";
+    }
+
+    function batteryTextClass(tier) {
+        return tier === "good" ? "text-ok" : `text-${tier}`;
+    }
+
     function batteryMeta(state) {
         const profile = String(state.batteryProfile || "unknown");
         const voltageMv = Number(state.batteryVoltageMv || 0);
-        const externalLike = profile === "external" || profile === "unknown";
-        const low = externalLike ? voltageMv < 5000 : Boolean(state.lowBattery);
-        const percent = externalLike ? 100 : Math.max(0, Math.min(100, Number(state.battery || 0)));
+        const batteryState = String(state.batteryState || "normal");
+        const percent = Math.max(0, Math.min(100, Number(state.battery || 0)));
+        const low = Boolean(state.lowBattery);
+        const tier = batteryTier(percent);
+        let label;
+        let colorClass;
+
+        if (batteryState === "usb") {
+            label = "USB";
+            colorClass = "text-muted";
+        } else if (batteryState === "charging") {
+            label = `CHRG ${percent}%`;
+            colorClass = batteryTextClass(tier);
+        } else {
+            label = `${percent}%`;
+            colorClass = batteryTextClass(tier);
+        }
 
         return {
             profile,
             voltageMv,
             low,
-            percent
+            percent,
+            batteryState,
+            tier,
+            colorClass,
+            label
         };
     }
 
-    function tablerBatterySvg(percent, low) {
+    function tablerBatterySvg(percent, tier) {
         const pct = Math.max(0, Math.min(100, Number(percent || 0)));
         const fill = Math.round((pct / 100) * 16);
-        const color = low ? "#b57500" : "#2f8f74";
+        const color = BATTERY_COLOR_HEX[tier] || BATTERY_COLOR_HEX.good;
 
         return `<svg class="battery-svg" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="7" width="18" height="10" rx="2" ry="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="20" y="10" width="2" height="4" rx="1" fill="currentColor"/><rect x="4" y="9" width="${fill}" height="6" rx="1" fill="${color}"/></svg>`;
+    }
+
+    function tablerBatteryChargingSvg(percent, tier) {
+        const pct = Math.max(0, Math.min(100, Number(percent || 0)));
+        const fill = Math.round((pct / 100) * 16);
+        const color = BATTERY_COLOR_HEX[tier] || BATTERY_COLOR_HEX.good;
+
+        return `<svg class="battery-svg" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="7" width="18" height="10" rx="2" ry="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="20" y="10" width="2" height="4" rx="1" fill="currentColor"/><rect x="4" y="9" width="${fill}" height="6" rx="1" fill="${color}"/><path d="M12.5 8L9 13h2.4l-1 4.5L15 12h-2.6z" fill="#ffffff" stroke="${color}" stroke-width="0.6" stroke-linejoin="round"/></svg>`;
+    }
+
+    function tablerPlugSvg() {
+        return `<svg class="battery-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2v6M15 2v6M7 8h10v3a5 5 0 0 1-10 0V8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 16v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
     }
 
     function tablerWifiSvg(level) {
@@ -314,7 +368,13 @@
             s_lastDeviceDetails = details;
             renderWifiStatus(details);
             if (details.batteryPercent != null) {
-                renderBattery({ battery: details.batteryPercent, batteryProfile: "unknown", batteryVoltageMv: 0, lowBattery: false });
+                renderBattery({
+                    battery: details.batteryPercent,
+                    batteryProfile: "unknown",
+                    batteryState: details.batteryState,
+                    batteryVoltageMv: details.batteryVoltageMv,
+                    lowBattery: details.lowBattery
+                });
             }
         } catch (e) { /* silent */ }
     }
@@ -341,26 +401,40 @@
         const badge = ensureBatteryBadge();
 
         if (badge) {
-            badge.classList.toggle("battery-good", !meta.low);
-            badge.classList.toggle("battery-warn", meta.low);
+            badge.classList.remove("battery-good", "battery-warn", "battery-bad", "battery-usb");
+            if (meta.batteryState === "usb") {
+                badge.classList.add("battery-usb");
+            } else {
+                badge.classList.add(`battery-${meta.tier}`);
+            }
 
             const iconNode = el("batteryBadgeIcon");
             const textNode = el("batteryBadgeText");
             if (iconNode) {
-                iconNode.innerHTML = tablerBatterySvg(meta.percent, meta.low);
+                if (meta.batteryState === "usb") {
+                    iconNode.innerHTML = tablerPlugSvg();
+                } else if (meta.batteryState === "charging") {
+                    iconNode.innerHTML = tablerBatteryChargingSvg(meta.percent, meta.tier);
+                } else {
+                    iconNode.innerHTML = tablerBatterySvg(meta.percent, meta.tier);
+                }
             }
             if (textNode) {
-                textNode.textContent = `${meta.percent}%`;
+                textNode.textContent = meta.label;
             }
 
-            badge.title = `${meta.profile} @ ${(meta.voltageMv / 1000).toFixed(2)}V`;
+            badge.title = meta.batteryState === "usb"
+                ? `Running on USB power only — battery not connected (${(meta.voltageMv / 1000).toFixed(2)}V at sense pin)`
+                : `${meta.profile} @ ${(meta.voltageMv / 1000).toFixed(2)}V`;
         }
 
         const panelBattery = el("batteryValue");
         if (panelBattery) {
-            panelBattery.textContent = `${meta.percent}% (${(meta.voltageMv / 1000).toFixed(2)}V)`;
-            panelBattery.classList.toggle("text-ok", !meta.low);
-            panelBattery.classList.toggle("text-warn", meta.low);
+            panelBattery.textContent = meta.batteryState === "usb"
+                ? meta.label
+                : `${meta.label} (${(meta.voltageMv / 1000).toFixed(2)}V)`;
+            panelBattery.classList.remove("text-ok", "text-warn", "text-good", "text-bad", "text-muted");
+            panelBattery.classList.add(meta.colorClass);
         }
     }
 
@@ -810,7 +884,13 @@
                 renderWifiConnectionStatus(details);
                 renderWifiStatus(details);
                 if (details.batteryPercent != null) {
-                    renderBattery({ battery: details.batteryPercent, batteryProfile: "unknown", batteryVoltageMv: 0, lowBattery: false });
+                    renderBattery({
+                        battery: details.batteryPercent,
+                        batteryProfile: "unknown",
+                        batteryState: details.batteryState,
+                        batteryVoltageMv: details.batteryVoltageMv,
+                        lowBattery: details.lowBattery
+                    });
                 }
             } catch (err) {
                 appendLog(deviceLog, { error: String(err) });

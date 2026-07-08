@@ -1,0 +1,27 @@
+# Changelog
+
+All notable changes to px-wifi-v1 are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+Version numbers correspond to the contents of `version.txt`, which ESP-IDF
+embeds into the firmware build (`esp_app_desc_t.version`).
+
+## [0.1] - 2026-07-08
+
+### Added
+
+- `version.txt` as the single source of truth for the firmware version,
+  read automatically by the ESP-IDF build (previously the version shown in
+  `esp_app_desc_t` was just the `git describe` output).
+- Battery ADC sampling (`adc_oneshot` on GPIO9 / ADC1_CH8) with an
+  exponential moving average filter, sampled every ~100ms.
+- Battery state detection: `normal`, `usb` (no battery/divider signal
+  present), and `charging` (voltage above the profile's full-charge point).
+  Exposed via the prop state JSON (`batteryState`) and the device details
+  API (`batteryState`, `batteryVoltageMv`, `lowBattery`).
+- Global RGB status LED brightness scaling so LED hints render at a
+  consistent, dimmer overall brightness.
+
+### Changed
+
+- `external`/`unknown` battery profile full-charge point raised from
+  5000 mV to 5250 mV to better match measured hardware.

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_adc/adc_oneshot.h"
 #include "esp_app_desc.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -32,6 +33,18 @@ static const gpio_num_t s_wire_input_gpios[8] = {
 /* GPIO8 is reserved as the common low-side return for wire harness inputs. */
 static const gpio_num_t s_wire_ground_gpio = GPIO_NUM_8;
 
+/* BATT_SENSE per docs/pin-mapping.md: GPIO9 = ADC1_CH8, fed by the divider. */
+static const gpio_num_t s_battery_sense_gpio = GPIO_NUM_9;
+static adc_oneshot_unit_handle_t s_battery_adc_handle = NULL;
+static float s_battery_adc_ema = -1.0f; /* -1 = not yet initialized */
+#define BATTERY_ADC_CHANNEL ADC_CHANNEL_8
+#define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
+#define BATTERY_ADC_LOG_INTERVAL_MS 2000
+/* Exponential moving average smoothing factor for the battery ADC reading.
+ * Lower = smoother but slower to react; higher = more responsive but noisier.
+ * At one sample/second, 0.15 settles to ~95% of a step change in about 20s. */
+#define BATTERY_ADC_EMA_ALPHA 0.15f
+
 #define BATTERY_MAX_POINTS 20
 #define BATTERY_FILE_PATH "/spiffs/battery_profile.json"
 #define BATTERY_EXTERNAL_THRESHOLD_MV 5000
@@ -39,11 +52,22 @@ static const gpio_num_t s_wire_ground_gpio = GPIO_NUM_8;
 #define BATTERY_DIVIDER_R1_OHMS 21600
 #define BATTERY_DIVIDER_R2_OHMS 4430
 #define BATTERY_ADC_FULL_SCALE_MV 15000
+/* Below this, the sense line reads as if no battery/divider is connected at
+ * all (e.g. running on USB power only, no battery attached). Note some
+ * features (LED, buzzer) are powered from the battery rail, not USB, so this
+ * is reported as "usb" rather than assuming everything still works. */
+#define BATTERY_USB_ONLY_THRESHOLD_MV 400
 #define LOW_BATTERY_CUTOFF_DELAY_MS 15000
 #define DEEP_SLEEP_WAKE_GPIO GPIO_NUM_4
 #define RESULT_RESET_DELAY_S 60
 #define PROP_EVENT_QUEUE_LEN 8
 #define PROP_EVENT_NAME_LEN 24
+
+typedef enum {
+    BATTERY_STATE_NORMAL = 0,
+    BATTERY_STATE_USB,
+    BATTERY_STATE_CHARGING,
+} battery_state_t;
 
 typedef struct {
     int mv;
@@ -103,14 +127,14 @@ static const battery_profile_builtin_t s_builtin_profiles[] = {
         .name = "external",
         .count = 2,
         .points = {
-            {5000, 100}, {0, 100},
+            {5250, 100}, {0, 100},
         },
     },
     {
         .name = "unknown",
         .count = 2,
         .points = {
-            {5000, 100}, {0, 100},
+            {5250, 100}, {0, 100},
         },
     },
 };
@@ -139,6 +163,7 @@ typedef struct {
     int battery_voltage_mv;
     int battery_percent;
     bool battery_low;
+    battery_state_t battery_state;
     int64_t battery_zero_since_ms;
     int64_t battery_cutoff_since_ms;
     battery_point_t battery_points[BATTERY_MAX_POINTS];
@@ -160,6 +185,7 @@ static void queue_event_unlocked(const char *event_name);
 static const char *state_name(prop_state_t state);
 static bool json_extract_string(const char *json, const char *key, char *out, size_t out_size);
 static bool json_extract_int(const char *json, const char *key, int *out);
+static int clamp_int(int value, int min_v, int max_v);
 
 static void configure_deep_sleep_wake_gpio(void)
 {
@@ -252,6 +278,61 @@ static esp_err_t init_wire_ground_drive(void)
 
     ESP_LOGI(TAG, "GPIO %d configured as wire ground drive (OUTPUT LOW)", s_wire_ground_gpio);
     return ESP_OK;
+}
+
+static esp_err_t init_battery_adc(void)
+{
+    esp_err_t err;
+
+    adc_oneshot_unit_init_cfg_t unit_cfg = {
+        .unit_id = ADC_UNIT_1,
+    };
+    err = adc_oneshot_new_unit(&unit_cfg, &s_battery_adc_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "adc_oneshot_new_unit failed: %s", esp_err_to_name(err));
+        s_battery_adc_handle = NULL;
+        return err;
+    }
+
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = BATTERY_ADC_ATTEN,
+    };
+    err = adc_oneshot_config_channel(s_battery_adc_handle, BATTERY_ADC_CHANNEL, &chan_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "adc_oneshot_config_channel(GPIO%d) failed: %s", s_battery_sense_gpio, esp_err_to_name(err));
+        adc_oneshot_del_unit(s_battery_adc_handle);
+        s_battery_adc_handle = NULL;
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Battery ADC configured on GPIO%d (ADC1_CH%d)", s_battery_sense_gpio, BATTERY_ADC_CHANNEL);
+    return ESP_OK;
+}
+
+static void sample_battery_adc_unlocked(void)
+{
+    int raw = 0;
+    esp_err_t err;
+
+    if (!s_battery_adc_handle) {
+        return;
+    }
+
+    err = adc_oneshot_read(s_battery_adc_handle, BATTERY_ADC_CHANNEL, &raw);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Battery ADC read failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    if (s_battery_adc_ema < 0.0f) {
+        /* First sample: seed the filter instead of ramping up from 0. */
+        s_battery_adc_ema = (float)raw;
+    } else {
+        s_battery_adc_ema += BATTERY_ADC_EMA_ALPHA * ((float)raw - s_battery_adc_ema);
+    }
+
+    s_ctx.battery_adc_raw = clamp_int((int)(s_battery_adc_ema + 0.5f), 0, BATTERY_ADC_MAX_VALUE);
 }
 
 static void wire_input_task(void *arg)
@@ -687,18 +768,47 @@ static bool battery_profile_is_external_like(const char *profile)
     return strcmp(profile, "external") == 0 || strcmp(profile, "unknown") == 0;
 }
 
+static const char *battery_state_name(battery_state_t state)
+{
+    switch (state) {
+        case BATTERY_STATE_USB:
+            return "usb";
+        case BATTERY_STATE_CHARGING:
+            return "charging";
+        case BATTERY_STATE_NORMAL:
+        default:
+            return "normal";
+    }
+}
+
 static void update_battery_runtime_unlocked(void)
 {
     s_ctx.battery_voltage_mv = battery_voltage_mv_from_adc_raw(s_ctx.battery_adc_raw);
 
-    if (battery_profile_is_external_like(s_ctx.battery_profile)) {
-        s_ctx.battery_percent = 100;
-        s_ctx.battery_low = s_ctx.battery_voltage_mv < BATTERY_EXTERNAL_THRESHOLD_MV;
+    if (s_ctx.battery_voltage_mv < BATTERY_USB_ONLY_THRESHOLD_MV) {
+        /* No battery/divider signal present at all: running on USB power only. */
+        s_ctx.battery_state = BATTERY_STATE_USB;
+        s_ctx.battery_percent = 0;
+        s_ctx.battery_low = false;
         return;
     }
 
-    s_ctx.battery_percent = battery_percent_from_voltage_mv(s_ctx.battery_voltage_mv);
-    s_ctx.battery_low = s_ctx.battery_percent <= s_ctx.low_battery_percent;
+    if (battery_profile_is_external_like(s_ctx.battery_profile)) {
+        s_ctx.battery_percent = 100;
+        s_ctx.battery_low = s_ctx.battery_voltage_mv < BATTERY_EXTERNAL_THRESHOLD_MV;
+    } else {
+        s_ctx.battery_percent = battery_percent_from_voltage_mv(s_ctx.battery_voltage_mv);
+        s_ctx.battery_low = s_ctx.battery_percent <= s_ctx.low_battery_percent;
+    }
+
+    /* A resting, fully-charged battery should read at or below its profile's
+     * top calibration point. Reading above it means a charger is actively
+     * pushing extra voltage into the battery right now. */
+    if (s_ctx.battery_point_count > 0 && s_ctx.battery_voltage_mv > s_ctx.battery_points[0].mv) {
+        s_ctx.battery_state = BATTERY_STATE_CHARGING;
+    } else {
+        s_ctx.battery_state = BATTERY_STATE_NORMAL;
+    }
 }
 
 static void set_default_battery_config(void)
@@ -1641,9 +1751,27 @@ static void timer_task(void *arg)
             reset_round();
         }
 
+        /* Sample every ~100ms (not just once/sec) so the EMA filter settles to
+         * real changes (e.g. battery disconnected) in wall-clock seconds
+         * instead of ~10x longer, while keeping the same per-sample alpha
+         * (and therefore the same noise rejection) for steady readings. */
+        sample_battery_adc_unlocked();
+        update_battery_runtime_unlocked();
+
         if ((now_ms() % 1000) < 120) {
             int64_t now = now_ms();
-            update_battery_runtime_unlocked();
+
+            static int64_t last_log_ms = 0;
+            if ((now - last_log_ms) >= BATTERY_ADC_LOG_INTERVAL_MS) {
+                ESP_LOGI(TAG,
+                         "Battery: adc_raw=%d voltage_mv=%d percent=%d%% profile=%s low=%s",
+                         s_ctx.battery_adc_raw,
+                         s_ctx.battery_voltage_mv,
+                         s_ctx.battery_percent,
+                         s_ctx.battery_profile,
+                         s_ctx.battery_low ? "yes" : "no");
+                last_log_ms = now;
+            }
 
             if (s_ctx.battery_percent <= 0) {
                 if (s_ctx.battery_zero_since_ms == 0) {
@@ -1723,6 +1851,9 @@ esp_err_t prop_engine_init(void)
     (void)init_spiffs();
     ESP_ERROR_CHECK(init_wire_ground_drive());
     ESP_ERROR_CHECK(init_wire_inputs());
+    if (init_battery_adc() != ESP_OK) {
+        ESP_LOGE(TAG, "Battery ADC unavailable; battery readings will not update from hardware");
+    }
 
     /* Small delay to let pins settle after config */
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -1779,6 +1910,7 @@ static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
              "\"connectedMask\":%u,"
              "\"battery\":%d,"
              "\"batteryVoltageMv\":%d,"
+             "\"batteryState\":\"%s\","
              "\"lowBattery\":%s"
              "}",
              (long long)ts,
@@ -1793,6 +1925,7 @@ static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
              (unsigned)s_ctx.connected_mask,
              s_ctx.battery_percent,
              s_ctx.battery_voltage_mv,
+             battery_state_name(s_ctx.battery_state),
              s_ctx.battery_low ? "true" : "false");
 }
 

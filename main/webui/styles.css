@@ -85,6 +85,14 @@ h1, h2, h3 {
     color: var(--warn);
 }
 
+.battery-bad {
+    color: var(--bad);
+}
+
+.battery-usb {
+    color: var(--muted);
+}
+
 .battery-icon {
     width: 22px;
     height: 14px;
@@ -254,6 +262,14 @@ h1, h2, h3 {
 
 .text-warn {
     color: var(--warn);
+}
+
+.text-bad {
+    color: var(--bad);
+}
+
+.text-muted {
+    color: var(--muted);
 }
 
 .hidden {

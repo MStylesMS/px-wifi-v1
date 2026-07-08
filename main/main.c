@@ -26,6 +26,10 @@ static const char *TAG = "px-wifi-v1";
 #define BUZZER_DUTY_50  512
 #define BUZZER_MAX_NOTES 96
 
+/* Overall RGB status LED brightness, applied on top of each hint's color/
+ * pulse/blink pattern. 32/255 = 1/8th of full brightness. */
+#define LED_GLOBAL_BRIGHTNESS_LEVEL 32
+
 #define DISP_I2C_PORT I2C_NUM_0
 #define DISP_I2C_SDA 1
 #define DISP_I2C_SCL 2
@@ -187,6 +191,7 @@ static void led_task(void *arg)
         prop_led_hint_t hint = prop_engine_get_led_hint();
         int64_t t_ms = esp_timer_get_time() / 1000;
         rgb_color_t c = led_color_for_hint(hint, t_ms);
+        c = scale_color(c, LED_GLOBAL_BRIGHTNESS_LEVEL);
         (void)drv_rgb_led_set(0, c);
         vTaskDelay(pdMS_TO_TICKS(80));
     }

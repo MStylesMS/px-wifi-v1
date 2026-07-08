@@ -389,6 +389,9 @@ char *web_ui_json_build_device_details_payload(const char *prop_name,
                                                const char *build_time,
                                                int64_t free_memory_bytes,
                                                int battery_percent,
+                                               const char *battery_state,
+                                               int battery_voltage_mv,
+                                               bool battery_low,
                                                const char *network_name,
                                                const char *status,
                                                const char *ap_ip_address,
@@ -418,6 +421,9 @@ char *web_ui_json_build_device_details_payload(const char *prop_name,
     cJSON_AddNullToObject(root, "cpuTempC");
     cJSON_AddNumberToObject(root, "freeMemoryBytes", (double)free_memory_bytes);
     cJSON_AddNumberToObject(root, "batteryPercent", battery_percent);
+    json_add_string(root, "batteryState", battery_state && battery_state[0] ? battery_state : "normal");
+    cJSON_AddNumberToObject(root, "batteryVoltageMv", battery_voltage_mv);
+    cJSON_AddBoolToObject(root, "lowBattery", battery_low);
     json_add_string(root, "networkName", network_name);
     json_add_string(root, "status", status);
     json_add_string(root, "apIpAddress", ap_ip_address);

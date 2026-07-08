@@ -1383,7 +1383,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    ESP_ERROR_CHECK(prop_engine_apply_config_json(body, false, response, sizeof(response)));
+    ESP_ERROR_CHECK(prop_engine_apply_config_json(body, persist, response, sizeof(response)));
 
     if (web_ui_json_get_string(root, "wifiSsid", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.wifi_ssid, sizeof(s_conn_cfg.wifi_ssid), value);
@@ -1670,7 +1670,10 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
 {
     char state_json[768] = {0};
     char game_state[32] = "unknown";
+    char battery_state[16] = "normal";
     int battery = -1;
+    int battery_voltage_mv = 0;
+    bool battery_low = false;
     int64_t free_heap = (int64_t)esp_get_free_heap_size();
     const esp_app_desc_t *app = esp_app_get_description();
     char ip_text[32] = "unavailable";
@@ -1688,6 +1691,9 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     prop_engine_get_state_json(state_json, sizeof(state_json));
     (void)json_extract_int_local(state_json, "battery", &battery);
     (void)json_extract_string_local(state_json, "gameState", game_state, sizeof(game_state));
+    (void)json_extract_string_local(state_json, "batteryState", battery_state, sizeof(battery_state));
+    (void)json_extract_int_local(state_json, "batteryVoltageMv", &battery_voltage_mv);
+    (void)json_extract_bool_local(state_json, "lowBattery", &battery_low);
 
     char *payload;
     char wifi_ssid_json[64] = "";
@@ -1714,6 +1720,9 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
                                                        app->time,
                                                        free_heap,
                                                        battery,
+                                                       battery_state,
+                                                       battery_voltage_mv,
+                                                       battery_low,
                                                        s_conn_cfg.network_name,
                                                        game_state,
                                                        ap_ip_text,
