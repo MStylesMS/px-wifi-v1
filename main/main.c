@@ -37,6 +37,13 @@ static const char *TAG = "px-wifi-v1";
 #define DISP_HT16K33_ADDR_DEFAULT 0x70
 #define DEEP_SLEEP_WAKE_GPIO 4
 
+/* Must match INPUT_8 (lid_switch) in prop_engine.c's s_wire_input_gpios[]
+ * table (docs/pin-mapping.md). Kept as a separate named constant here
+ * rather than a shared header since main.c only needs to read the lid
+ * switch level directly for display-blanking, not manage its debounce
+ * state (that stays owned by prop_engine.c). */
+#define LID_SWITCH_GPIO GPIO_NUM_18
+
 #if BOARD_RGB_LED_COUNT < 1 || BOARD_RGB_LED_COUNT > DRV_RGB_LED_MAX_LEDS
 #error "BOARD_RGB_LED_COUNT must be in range 1..DRV_RGB_LED_MAX_LEDS"
 #endif
@@ -302,6 +309,11 @@ static void display_render_ready_chase(uint16_t frame[8], int64_t now_ms)
     display_set_digit(frame, dot_idx, SEG_DP);
 }
 
+/* Renders MM:SS as 4 digits on the 7-segment display, clamped to the
+ * display's max representable time (99:59) so a runaway/misconfigured
+ * timer value can't wrap the digits or index out of range. The colon
+ * (decimal point on digit index 2) is toggled by the caller to blink at
+ * 1 Hz while the countdown is running. */
 static void display_render_mmss(uint16_t frame[8], int total_seconds, bool colon_on)
 {
     int mm;
@@ -327,6 +339,14 @@ static void display_render_mmss(uint16_t frame[8], int total_seconds, bool colon
     }
 }
 
+/* Overlays one "progress bar" segment per connected wire input on top of
+ * whatever's already in `frame` (MM:SS digits or blank). Inputs 1-4 map to
+ * the top segment (SEG_A) of digits 0,1 and the (unused-by-time-display)
+ * digits 3,4; inputs 5-8 map to the bottom segment (SEG_D) of the same four
+ * digit positions. This gives a quick "how many wires are still connected"
+ * visual independent of the numeric countdown, without needing extra
+ * hardware. Only wires within the configured wire_count are shown; unused
+ * wire slots and disconnected wires are left blank. */
 static void display_apply_progress_bars(uint16_t frame[8], uint8_t connected_mask, int wire_count)
 {
     int i;
@@ -339,9 +359,11 @@ static void display_apply_progress_bars(uint16_t frame[8], uint8_t connected_mas
         }
 
         if (i < 4) {
+            /* Inputs 1-4: top segment of digit positions 0,1,3,4. */
             static const int idx_map[4] = {0, 1, 3, 4};
             frame[idx_map[i]] |= SEG_A;
         } else {
+            /* Inputs 5-8: bottom segment of the same four digit positions. */
             static const int idx_map[4] = {0, 1, 3, 4};
             frame[idx_map[i - 4]] |= SEG_D;
         }
@@ -392,7 +414,7 @@ static bool lid_forces_blank(const char *lid_mode)
         return false;
     }
 
-    level = gpio_get_level(GPIO_NUM_18);
+    level = gpio_get_level(LID_SWITCH_GPIO);
     if (strcmp(lid_mode, "closed") == 0) {
         return level == 0;
     }

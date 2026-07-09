@@ -27,6 +27,15 @@
 
 static const char *TAG = "web_ui";
 
+/* Upper bound on the JSON request body accepted by config/connection POST
+ * handlers. req->content_len is attacker-controlled input; without a cap an
+ * oversized Content-Length lets a remote client force an arbitrarily large
+ * heap allocation (calloc(1, content_len + 1)) and exhaust the device's
+ * ~300KB heap with a single request. 16KB is generously above the largest
+ * legitimate config/connection payload (a few KB of JSON) while still
+ * bounding worst-case memory use. */
+#define WEB_UI_MAX_JSON_BODY_LEN 16384
+
 static bool json_extract_string_local(const char *json, const char *key, char *out, size_t out_size);
 static bool json_extract_int_local(const char *json, const char *key, int *out);
 static bool json_extract_bool_local(const char *json, const char *key, bool *out);
@@ -539,6 +548,8 @@ static void mqtt_apply_follower_payload(const char *payload, int payload_len)
     }
 
     if (payload_len >= (int)sizeof(msg)) {
+        ESP_LOGW(TAG, "mqtt_apply_follower_payload: message truncated from %d to %d bytes",
+                 payload_len, (int)sizeof(msg) - 1);
         payload_len = (int)sizeof(msg) - 1;
     }
     memcpy(msg, payload, (size_t)payload_len);
@@ -914,6 +925,11 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     esp_err_t status = ESP_OK;
     cJSON *root = NULL;
 
+    if (req->content_len <= 0 || req->content_len > WEB_UI_MAX_JSON_BODY_LEN) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "Request body too large");
+        return ESP_FAIL;
+    }
+
     body = (char *)calloc(1, (size_t)req->content_len + 1);
     if (!body) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
@@ -1072,6 +1088,11 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
     bool wifi_password_updated = false;
     esp_err_t status = ESP_OK;
     cJSON *root = NULL;
+
+    if (req->content_len <= 0 || req->content_len > WEB_UI_MAX_JSON_BODY_LEN) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "Request body too large");
+        return ESP_FAIL;
+    }
 
     body = (char *)calloc(1, (size_t)req->content_len + 1);
     if (!body) {

@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lib_json_helper.h"
 
 static const char *TAG = "prop_engine";
 
@@ -39,10 +40,48 @@ static const gpio_num_t s_battery_sense_gpio = GPIO_NUM_9;
 #define BATTERY_ADC_CHANNEL ADC_CHANNEL_8
 #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
 #define BATTERY_ADC_LOG_INTERVAL_MS 2000
-/* Exponential moving average smoothing factor for the battery ADC reading.
- * Lower = smoother but slower to react; higher = more responsive but noisier.
- * At one sample/second, 0.15 settles to ~95% of a step change in about 20s. */
-#define BATTERY_ADC_EMA_ALPHA 0.15f
+/* Exponential moving average smoothing factor for the battery ADC reading,
+ * applied every ~100ms (see timer_task()). Lower = smoother but slower to
+ * react; higher = more responsive but noisier.
+ *
+ * At a 100ms sample interval, alpha directly sets the filter's real-time
+ * bandwidth: effective time constant tau ~= sample_interval_ms / alpha.
+ *   0.04 -> tau ~= 2.5s (~95% settled in ~3*tau =~ 7-8s)
+ * This was previously 0.15 (tau ~= 0.7s), which was tuned to catch a
+ * sudden power-loss drop to ~0V quickly, but also let much more ADC/ripple
+ * noise through during normal charging/running, making the displayed
+ * voltage visibly jump around. 0.04 is still comfortably faster than the
+ * existing sustained-low-reading safety windows before deep sleep is
+ * triggered (LOW_BATTERY_CUTOFF_DELAY_MS = 15s, battery_shutdown_delay_s
+ * default = 60s), so genuine power loss is still caught well within those
+ * grace periods, while normal operation reads much more smoothly. */
+#define BATTERY_ADC_EMA_ALPHA 0.04f
+
+/* Number of back-to-back raw ADC reads averaged into each ~100ms sample
+ * before the EMA filter (see drv_battery_monitor). Reduces per-sample ADC
+ * noise at the source instead of relying solely on a slower EMA, which
+ * would otherwise trade away responsiveness to genuine voltage changes. */
+#define BATTERY_ADC_OVERSAMPLE_COUNT 16
+
+/* Median-of-N pre-filter applied before the EMA (see drv_battery_monitor).
+ * Diagnostic capture on 2026-07-09 (see
+ * docs/experiments/power/battery-adc-noise-2026-07-09.md) showed the
+ * dominant "noise" is actually brief, one-directional impulse dropouts
+ * (likely current-draw sag from nearby radio/PWM activity), not symmetric
+ * white noise -- a median filter rejects that far better than more EMA
+ * smoothing alone, which just trades away reaction speed. */
+#define BATTERY_ADC_MEDIAN_WINDOW 5
+
+/* Sustained-drop override: if the (median-filtered) reading stays at least
+ * this many mV below the current filtered value for a full continuous
+ * BATTERY_ADC_DROP_SUSTAIN_MS window, the filter snaps immediately to the
+ * recent average instead of creeping down via the EMA. This lets normal
+ * operation be smoothed heavily while still reacting to a genuine power/
+ * battery-disconnect event well within the <=5s requirement (measured
+ * ~1.1s in testing, vs ~2.85s for the EMA alone) -- see the same
+ * experiment doc for the data and reasoning behind these values. */
+#define BATTERY_ADC_DROP_THRESHOLD_MV 1000
+#define BATTERY_ADC_DROP_SUSTAIN_MS 1000
 
 #define BATTERY_MAX_POINTS 20
 #define BATTERY_FILE_PATH "/spiffs/battery_profile.json"
@@ -185,6 +224,28 @@ static const char *state_name(prop_state_t state);
 static bool json_extract_string(const char *json, const char *key, char *out, size_t out_size);
 static bool json_extract_int(const char *json, const char *key, int *out);
 static int clamp_int(int value, int min_v, int max_v);
+static int battery_drop_threshold_raw_for_mv(int mv);
+
+#define PROP_LOCK_TIMEOUT_MS 5000
+
+/* Acquire s_ctx.lock with a bounded timeout instead of portMAX_DELAY. If a
+ * task somehow stalls while holding the lock (bug, hardware fault, etc.),
+ * callers get a chance to detect and log it and skip/abort their current
+ * operation instead of deadlocking the whole prop indefinitely. */
+static bool prop_lock(void)
+{
+    if (xSemaphoreTake(s_ctx.lock, pdMS_TO_TICKS(PROP_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "prop_engine: failed to acquire lock within %dms (possible deadlock)",
+                 PROP_LOCK_TIMEOUT_MS);
+        return false;
+    }
+    return true;
+}
+
+static inline void prop_unlock(void)
+{
+    xSemaphoreGive(s_ctx.lock);
+}
 
 static void configure_deep_sleep_wake_gpio(void)
 {
@@ -288,6 +349,15 @@ static esp_err_t init_battery_adc(void)
     cfg.atten = BATTERY_ADC_ATTEN;
     cfg.max_adc_value = BATTERY_ADC_MAX_VALUE;
     cfg.ema_alpha = BATTERY_ADC_EMA_ALPHA;
+    cfg.oversample_count = BATTERY_ADC_OVERSAMPLE_COUNT;
+    cfg.median_window = BATTERY_ADC_MEDIAN_WINDOW;
+    cfg.drop_sustain_ms = BATTERY_ADC_DROP_SUSTAIN_MS;
+    /* set_default_battery_config() has already run by this point in
+     * prop_engine_init(), so battery_adc_at_0v/at_15v hold at least the
+     * default calibration; update_battery_runtime_unlocked() keeps this in
+     * sync afterward if the real calibration (loaded from file or set via
+     * a command) differs. */
+    cfg.drop_threshold_raw = battery_drop_threshold_raw_for_mv(BATTERY_ADC_DROP_THRESHOLD_MV);
 
     esp_err_t err = drv_battery_monitor_init(&cfg);
     if (err == ESP_OK) {
@@ -320,10 +390,14 @@ static void wire_input_task(void *arg)
         int check_interval_ms;
         int required_consecutive;
 
-        xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
-        check_interval_ms = s_ctx.cfg.debounce_check_interval_ms;
-        required_consecutive = s_ctx.cfg.debounce_consecutive_reads;
-        xSemaphoreGive(s_ctx.lock);
+        if (prop_lock()) {
+            check_interval_ms = s_ctx.cfg.debounce_check_interval_ms;
+            required_consecutive = s_ctx.cfg.debounce_consecutive_reads;
+            prop_unlock();
+        } else {
+            check_interval_ms = 0;
+            required_consecutive = 0;
+        }
 
         if (check_interval_ms < 1) {
             check_interval_ms = 10;
@@ -355,13 +429,16 @@ static void wire_input_task(void *arg)
                          connected ? "HIGH" : "LOW",
                          connected ? "LOW (connected)" : "HIGH (disconnected)");
 
-                xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
-                if (connected) {
-                    handle_connect_unlocked(i + 1);
+                if (prop_lock()) {
+                    if (connected) {
+                        handle_connect_unlocked(i + 1);
+                    } else {
+                        handle_disconnect_unlocked(i + 1);
+                    }
+                    prop_unlock();
                 } else {
-                    handle_disconnect_unlocked(i + 1);
+                    ESP_LOGE(TAG, "wire_input_task: dropping input %d transition, lock unavailable", i + 1);
                 }
-                xSemaphoreGive(s_ctx.lock);
             }
         }
     }
@@ -548,6 +625,14 @@ static bool sanitize_solution_vector(const char *src, char *out, size_t out_size
     return w > 0;
 }
 
+/* The battery sense line is fed through a resistive divider (R1 from
+ * battery+, R2 to ground) so the ADC only ever sees a safe fraction of the
+ * true battery voltage. These two helpers convert between the "real"
+ * input-side voltage (what the battery actually reads) and the "sense"
+ * voltage the ADC pin actually sees:
+ *   sense_mv = input_mv * R2 / (R1 + R2)
+ *   input_mv = sense_mv * (R1 + R2) / R2
+ */
 static int battery_divider_sense_mv_from_input_mv(int input_mv)
 {
     int64_t num = (int64_t)input_mv * BATTERY_DIVIDER_R2_OHMS;
@@ -563,6 +648,18 @@ static int battery_divider_input_mv_from_sense_mv(int sense_mv)
     return (int)(num / BATTERY_DIVIDER_R2_OHMS);
 }
 
+/* Converts a raw ADC reading to a battery voltage using a 2-point
+ * calibration: (battery_adc_at_0v, battery_adc_at_15v) map the ADC's raw
+ * range onto the divider's expected sense-voltage range for 0..
+ * BATTERY_ADC_FULL_SCALE_MV at the input side. This lets each physical
+ * board compensate for its own resistor tolerances/ADC offset by
+ * calibrating those two raw ADC values (see setBatteryCalibration command)
+ * instead of assuming ideal resistor values end-to-end.
+ *
+ * If the two calibration points collapse (denom <= 0, e.g. never
+ * calibrated or corrupted config), we deliberately do NOT divide by zero:
+ * fall back to holding the last known-good voltage reading rather than
+ * producing a nonsensical value. */
 static int battery_voltage_mv_from_adc_raw(int adc_raw)
 {
     int denom = s_ctx.battery_adc_at_15v - s_ctx.battery_adc_at_0v;
@@ -577,6 +674,11 @@ static int battery_voltage_mv_from_adc_raw(int adc_raw)
     return clamp_int(battery_divider_input_mv_from_sense_mv((int)sense_mv), 0, BATTERY_ADC_FULL_SCALE_MV);
 }
 
+/* Inverse of battery_voltage_mv_from_adc_raw(): given a target battery
+ * voltage, returns the raw ADC value that would produce it under the
+ * current 2-point calibration. Used by the simulated-battery test/demo
+ * path, not by real hardware sampling. Same divide-by-zero guard as above
+ * applies if the calibration points haven't been set. */
 static int battery_adc_raw_from_voltage_mv(int mv)
 {
     int sense_ref_mv = battery_divider_sense_mv_from_input_mv(BATTERY_ADC_FULL_SCALE_MV);
@@ -589,6 +691,23 @@ static int battery_adc_raw_from_voltage_mv(int mv)
 
     num = (int64_t)sense_mv * (s_ctx.battery_adc_at_15v - s_ctx.battery_adc_at_0v);
     return clamp_int(s_ctx.battery_adc_at_0v + (int)(num / sense_ref_mv), 0, BATTERY_ADC_MAX_VALUE);
+}
+
+/* Converts a voltage delta (mv) to the equivalent number of raw ADC counts
+ * under the current 2-point calibration, for configuring
+ * drv_battery_monitor's sustained-drop-override threshold (which is
+ * expressed in raw counts since the driver itself doesn't know about
+ * voltage-divider ratios or calibration -- see drv_battery_monitor.h).
+ * Returns 0 (disabling the override) if the calibration span is invalid,
+ * rather than risk an incorrect threshold. */
+static int battery_drop_threshold_raw_for_mv(int mv)
+{
+    int denom = s_ctx.battery_adc_at_15v - s_ctx.battery_adc_at_0v;
+
+    if (denom <= 0 || mv <= 0) {
+        return 0;
+    }
+    return (int)(((int64_t)mv * denom) / BATTERY_ADC_FULL_SCALE_MV);
 }
 
 static const battery_profile_builtin_t *find_builtin_profile(const char *name)
@@ -750,6 +869,13 @@ static const char *battery_state_name(battery_state_t state)
 
 static void update_battery_runtime_unlocked(void)
 {
+    /* Keep drv_battery_monitor's sustained-drop-override threshold in sync
+     * with the live calibration (which may change after a config/battery
+     * file load or a setBatteryCalibration command, both of which run
+     * after init_battery_adc() first configured it). Cheap: just an
+     * int store in the driver, safe to call every cycle. */
+    drv_battery_monitor_set_drop_threshold_raw(battery_drop_threshold_raw_for_mv(BATTERY_ADC_DROP_THRESHOLD_MV));
+
     s_ctx.battery_voltage_mv = battery_voltage_mv_from_adc_raw(s_ctx.battery_adc_raw);
 
     if (s_ctx.battery_voltage_mv < BATTERY_USB_ONLY_THRESHOLD_MV) {
@@ -989,101 +1115,27 @@ static bool is_active_state(void)
 
 static bool json_extract_string(const char *json, const char *key, char *out, size_t out_size)
 {
-    char key_pat[48];
-    const char *p;
-    const char *q;
-    size_t len;
-
-    snprintf(key_pat, sizeof(key_pat), "\"%s\"", key);
-    p = strstr(json, key_pat);
-    if (!p) {
-        return false;
-    }
-
-    p = strchr(p, ':');
-    if (!p) {
-        return false;
-    }
-    p++;
-    while (*p && isspace((unsigned char)*p)) {
-        p++;
-    }
-    if (*p != '"') {
-        return false;
-    }
-    p++;
-    q = strchr(p, '"');
-    if (!q) {
-        return false;
-    }
-
-    len = (size_t)(q - p);
-    if (len >= out_size) {
-        len = out_size - 1;
-    }
-    memcpy(out, p, len);
-    out[len] = '\0';
-    return true;
+    /* Delegates to the shared, bounds-checked cJSON-backed helper in
+     * px-components/lib_json_helper instead of hand-rolled pointer
+     * scanning (previously vulnerable to missing-quote/escape-sequence
+     * edge cases and only offered silent truncation on overflow). */
+    return lib_json_extract_string(json, key, out, out_size);
 }
 
 static bool json_extract_int(const char *json, const char *key, int *out)
 {
-    char key_pat[48];
-    const char *p;
-
-    snprintf(key_pat, sizeof(key_pat), "\"%s\"", key);
-    p = strstr(json, key_pat);
-    if (!p) {
-        return false;
-    }
-
-    p = strchr(p, ':');
-    if (!p) {
-        return false;
-    }
-    p++;
-    while (*p && isspace((unsigned char)*p)) {
-        p++;
-    }
-
-    *out = (int)strtol(p, NULL, 10);
-    return true;
+    return lib_json_extract_int(json, key, out);
 }
 
 static bool json_extract_bool(const char *json, const char *key, bool *out)
 {
-    char key_pat[48];
-    const char *p;
-
-    snprintf(key_pat, sizeof(key_pat), "\"%s\"", key);
-    p = strstr(json, key_pat);
-    if (!p) {
-        return false;
-    }
-
-    p = strchr(p, ':');
-    if (!p) {
-        return false;
-    }
-    p++;
-    while (*p && isspace((unsigned char)*p)) {
-        p++;
-    }
-
-    if (strncmp(p, "true", 4) == 0) {
-        *out = true;
-        return true;
-    }
-    if (strncmp(p, "false", 5) == 0) {
-        *out = false;
-        return true;
-    }
-    return false;
+    return lib_json_extract_bool(json, key, out);
 }
 
 static esp_err_t save_config_file(void)
 {
     FILE *f;
+    int written;
 
     if (!s_ctx.spiffs_ready) {
         return ESP_ERR_INVALID_STATE;
@@ -1095,7 +1147,7 @@ static esp_err_t save_config_file(void)
         return ESP_FAIL;
     }
 
-    fprintf(f,
+    written = fprintf(f,
             "{\n"
             "  \"defaultTime\": %d,\n"
             "  \"penalty\": %d,\n"
@@ -1163,7 +1215,15 @@ static esp_err_t save_config_file(void)
             s_ctx.cfg.buzzer_solved_mml,
             s_ctx.cfg.buzzer_failed_mml);
 
-    fclose(f);
+    if (written < 0) {
+        ESP_LOGE(TAG, "Failed to write /spiffs/config.json (disk full?)");
+        fclose(f);
+        return ESP_FAIL;
+    }
+    if (fclose(f) != 0) {
+        ESP_LOGE(TAG, "Failed to flush/close /spiffs/config.json (disk full?)");
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
@@ -1171,6 +1231,7 @@ static esp_err_t save_battery_file(void)
 {
     FILE *f;
     char points_csv[640];
+    int written;
 
     if (!s_ctx.spiffs_ready) {
         return ESP_ERR_INVALID_STATE;
@@ -1184,7 +1245,7 @@ static esp_err_t save_battery_file(void)
         return ESP_FAIL;
     }
 
-    fprintf(f,
+    written = fprintf(f,
             "{\n"
             "  \"profile\": \"%s\",\n"
             "  \"lowBatteryPercent\": %d,\n"
@@ -1204,7 +1265,15 @@ static esp_err_t save_battery_file(void)
             s_ctx.battery_voltage_mv,
             points_csv);
 
-    fclose(f);
+    if (written < 0) {
+        ESP_LOGE(TAG, "Failed to write %s (disk full?)", BATTERY_FILE_PATH);
+        fclose(f);
+        return ESP_FAIL;
+    }
+    if (fclose(f) != 0) {
+        ESP_LOGE(TAG, "Failed to flush/close %s (disk full?)", BATTERY_FILE_PATH);
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
@@ -1703,7 +1772,9 @@ static void timer_task(void *arg)
 
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+        if (!prop_lock()) {
+            continue;
+        }
 
         if (s_ctx.state == PROP_STATE_COUNTDOWN) {
             s_ctx.time_remaining_ms -= 100;
@@ -1765,7 +1836,7 @@ static void timer_task(void *arg)
             }
         }
 
-        xSemaphoreGive(s_ctx.lock);
+        prop_unlock();
 
         if (should_deep_sleep) {
             if (s_ctx.low_battery_cutoff_percent > 0 &&
@@ -1825,7 +1896,9 @@ esp_err_t prop_engine_init(void)
     /* Small delay to let pins settle after config */
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        return ESP_ERR_TIMEOUT;
+    }
     load_config_file_if_present();
     load_battery_file_if_present();
 
@@ -1840,7 +1913,7 @@ esp_err_t prop_engine_init(void)
     ESP_LOGI(TAG, "Initial connected_mask=0x%02X (wire_count=%d)", (unsigned)s_ctx.connected_mask, s_ctx.cfg.wire_count);
     s_ctx.time_remaining_ms = s_ctx.cfg.default_time_s * 1000;
     set_ready_state();
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
 
     xTaskCreate(wire_input_task, "wire_inputs", 4096, NULL, 6, NULL);
     xTaskCreate(timer_task, "prop_timer", 4096, NULL, 5, NULL);
@@ -1850,9 +1923,14 @@ esp_err_t prop_engine_init(void)
 
 void prop_engine_get_state_json(char *out, size_t out_size)
 {
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        if (out && out_size > 0) {
+            out[0] = '\0';
+        }
+        return;
+    }
     prop_engine_get_state_json_unlocked(out, out_size);
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
 }
 
 static void prop_engine_get_state_json_unlocked(char *out, size_t out_size)
@@ -1900,7 +1978,12 @@ void prop_engine_get_config_json(char *out, size_t out_size)
 {
     const prop_config_t *cfg;
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        if (out && out_size > 0) {
+            out[0] = '\0';
+        }
+        return;
+    }
     cfg = &s_ctx.cfg;
 
     snprintf(out,
@@ -1966,7 +2049,7 @@ void prop_engine_get_config_json(char *out, size_t out_size)
              cfg->buzzer_solved_mml,
              cfg->buzzer_failed_mml);
 
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
 }
 
 void prop_engine_get_default_config_json(char *out, size_t out_size)
@@ -2045,12 +2128,16 @@ void prop_engine_get_buzzer_mml_config(prop_buzzer_mml_config_t *out)
         return;
     }
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+
+    if (!prop_lock()) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
     copy_bounded(out->start_resume, sizeof(out->start_resume), s_ctx.cfg.buzzer_start_resume_mml);
     copy_bounded(out->pause_reset, sizeof(out->pause_reset), s_ctx.cfg.buzzer_pause_reset_mml);
     copy_bounded(out->solved, sizeof(out->solved), s_ctx.cfg.buzzer_solved_mml);
     copy_bounded(out->failed, sizeof(out->failed), s_ctx.cfg.buzzer_failed_mml);
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
 }
 
 void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out)
@@ -2059,7 +2146,10 @@ void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out)
         return;
     }
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
     out->state = s_ctx.state;
     out->time_remaining_ms = s_ctx.time_remaining_ms;
     out->connected_mask = s_ctx.connected_mask;
@@ -2067,7 +2157,7 @@ void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out)
     out->ready_show_time = s_ctx.ready_show_time;
     out->stopped = s_ctx.stopped;
     copy_bounded(out->lid_mode, sizeof(out->lid_mode), s_ctx.cfg.lid_mode);
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
 }
 
 bool prop_engine_pop_event_json(char *out, size_t out_size)
@@ -2078,16 +2168,19 @@ bool prop_engine_pop_event_json(char *out, size_t out_size)
         return false;
     }
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        out[0] = '\0';
+        return false;
+    }
     if (s_ctx.event_head == s_ctx.event_tail) {
-        xSemaphoreGive(s_ctx.lock);
+        prop_unlock();
         out[0] = '\0';
         return false;
     }
 
     event = s_ctx.event_queue[s_ctx.event_head];
     s_ctx.event_head = (s_ctx.event_head + 1) % PROP_EVENT_QUEUE_LEN;
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
 
     snprintf(out,
              out_size,
@@ -2438,10 +2531,13 @@ esp_err_t prop_engine_handle_command_json(const char *json, char *response, size
         return ESP_OK;
     }
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        snprintf(response, response_size, "{\"ok\":false,\"error\":\"busy\"}");
+        return ESP_ERR_TIMEOUT;
+    }
     {
         esp_err_t err = handle_command_unlocked(command, json, response, response_size);
-        xSemaphoreGive(s_ctx.lock);
+        prop_unlock();
         return err;
     }
 }
@@ -2454,7 +2550,10 @@ esp_err_t prop_engine_apply_config_json(const char *json, bool persist, char *re
         return ESP_ERR_INVALID_ARG;
     }
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        snprintf(response, response_size, "{\"ok\":false,\"error\":\"busy\"}");
+        return ESP_ERR_TIMEOUT;
+    }
 
     apply_config_json_unlocked(json);
     if (!is_active_state()) {
@@ -2477,7 +2576,7 @@ esp_err_t prop_engine_apply_config_json(const char *json, bool persist, char *re
              persist ? "true" : "false",
              s_ctx.spiffs_ready ? "true" : "false");
 
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
     return ESP_OK;
 }
 
@@ -2489,7 +2588,10 @@ esp_err_t prop_engine_restore_defaults(bool persist, char *response, size_t resp
         return ESP_ERR_INVALID_ARG;
     }
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        snprintf(response, response_size, "{\"ok\":false,\"error\":\"busy\"}");
+        return ESP_ERR_TIMEOUT;
+    }
 
     set_default_config(&s_ctx.cfg);
     set_default_battery_config();
@@ -2513,7 +2615,7 @@ esp_err_t prop_engine_restore_defaults(bool persist, char *response, size_t resp
              persist ? "true" : "false",
              s_ctx.spiffs_ready ? "true" : "false");
 
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
     return ESP_OK;
 }
 
@@ -2521,9 +2623,11 @@ prop_led_hint_t prop_engine_get_led_hint(void)
 {
     prop_led_hint_t hint;
 
-    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    if (!prop_lock()) {
+        return PROP_LED_HINT_OFF;
+    }
     hint = led_hint_unlocked();
-    xSemaphoreGive(s_ctx.lock);
+    prop_unlock();
 
     return hint;
 }
