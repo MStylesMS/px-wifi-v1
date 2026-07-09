@@ -9,6 +9,11 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ### Changed
 
+- Battery ADC sampling + EMA smoothing moved to the shared
+  `drv_battery_monitor` component (px-components v0.3). `prop_engine.c`
+  keeps all voltage-divider math, chemistry-profile percent calculation,
+  and low-battery cutoff behavior (calibration-dependent, prop-specific).
+  No behavior change intended.
 - Refactored WiFi/MQTT/JSON-helper code out of `web_ui.c` / `web_ui_json.c`
   and into the shared `px-components` library (`svc_wifi`, `svc_mqtt`,
   `lib_json_helper` — px-components v0.2). No behavior change intended;

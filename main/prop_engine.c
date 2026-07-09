@@ -12,6 +12,7 @@
 #include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
+#include "drv_battery_monitor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -35,8 +36,6 @@ static const gpio_num_t s_wire_ground_gpio = GPIO_NUM_8;
 
 /* BATT_SENSE per docs/pin-mapping.md: GPIO9 = ADC1_CH8, fed by the divider. */
 static const gpio_num_t s_battery_sense_gpio = GPIO_NUM_9;
-static adc_oneshot_unit_handle_t s_battery_adc_handle = NULL;
-static float s_battery_adc_ema = -1.0f; /* -1 = not yet initialized */
 #define BATTERY_ADC_CHANNEL ADC_CHANNEL_8
 #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
 #define BATTERY_ADC_LOG_INTERVAL_MS 2000
@@ -282,57 +281,25 @@ static esp_err_t init_wire_ground_drive(void)
 
 static esp_err_t init_battery_adc(void)
 {
-    esp_err_t err;
+    drv_battery_monitor_config_t cfg = DRV_BATTERY_MONITOR_CONFIG_DEFAULT();
 
-    adc_oneshot_unit_init_cfg_t unit_cfg = {
-        .unit_id = ADC_UNIT_1,
-    };
-    err = adc_oneshot_new_unit(&unit_cfg, &s_battery_adc_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "adc_oneshot_new_unit failed: %s", esp_err_to_name(err));
-        s_battery_adc_handle = NULL;
-        return err;
+    cfg.adc_unit = ADC_UNIT_1;
+    cfg.adc_channel = BATTERY_ADC_CHANNEL;
+    cfg.atten = BATTERY_ADC_ATTEN;
+    cfg.max_adc_value = BATTERY_ADC_MAX_VALUE;
+    cfg.ema_alpha = BATTERY_ADC_EMA_ALPHA;
+
+    esp_err_t err = drv_battery_monitor_init(&cfg);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Battery ADC configured on GPIO%d (ADC1_CH%d)", s_battery_sense_gpio, BATTERY_ADC_CHANNEL);
     }
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = BATTERY_ADC_ATTEN,
-    };
-    err = adc_oneshot_config_channel(s_battery_adc_handle, BATTERY_ADC_CHANNEL, &chan_cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "adc_oneshot_config_channel(GPIO%d) failed: %s", s_battery_sense_gpio, esp_err_to_name(err));
-        adc_oneshot_del_unit(s_battery_adc_handle);
-        s_battery_adc_handle = NULL;
-        return err;
-    }
-
-    ESP_LOGI(TAG, "Battery ADC configured on GPIO%d (ADC1_CH%d)", s_battery_sense_gpio, BATTERY_ADC_CHANNEL);
-    return ESP_OK;
+    return err;
 }
 
 static void sample_battery_adc_unlocked(void)
 {
-    int raw = 0;
-    esp_err_t err;
-
-    if (!s_battery_adc_handle) {
-        return;
-    }
-
-    err = adc_oneshot_read(s_battery_adc_handle, BATTERY_ADC_CHANNEL, &raw);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Battery ADC read failed: %s", esp_err_to_name(err));
-        return;
-    }
-
-    if (s_battery_adc_ema < 0.0f) {
-        /* First sample: seed the filter instead of ramping up from 0. */
-        s_battery_adc_ema = (float)raw;
-    } else {
-        s_battery_adc_ema += BATTERY_ADC_EMA_ALPHA * ((float)raw - s_battery_adc_ema);
-    }
-
-    s_ctx.battery_adc_raw = clamp_int((int)(s_battery_adc_ema + 0.5f), 0, BATTERY_ADC_MAX_VALUE);
+    drv_battery_monitor_sample();
+    s_ctx.battery_adc_raw = drv_battery_monitor_get_raw();
 }
 
 static void wire_input_task(void *arg)
