@@ -1,5 +1,6 @@
 #include "web_ui_json.h"
 #include "lib_json_helper.h"
+#include "svc_nvs_config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,17 +26,6 @@ static esp_err_t json_parse_object(const char *json, cJSON **out)
 
     *out = root;
     return ESP_OK;
-}
-
-static void json_merge_object(cJSON *dst, const cJSON *src)
-{
-    for (const cJSON *child = src ? src->child : NULL; child; child = child->next) {
-        if (!child->string) {
-            continue;
-        }
-        cJSON_DeleteItemFromObjectCaseSensitive(dst, child->string);
-        cJSON_AddItemToObject(dst, child->string, cJSON_Duplicate(child, true));
-    }
 }
 
 /* Pure parse/extract/escape helpers now live in the shared lib_json_helper
@@ -84,49 +74,18 @@ bool web_ui_json_extract_bool(const char *json, const char *key, bool *out)
 
 esp_err_t web_ui_json_load_connection_cfg(const char *path, connection_cfg_t *cfg)
 {
-    FILE *f;
-    long size;
-    char *buf = NULL;
     cJSON *root = NULL;
     int i_val;
     bool b_val;
+    esp_err_t err;
 
     if (!path || !cfg) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    f = fopen(path, "r");
-    if (!f) {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return ESP_FAIL;
-    }
-    size = ftell(f);
-    if (size <= 0 || size > 8192) {
-        fclose(f);
-        return ESP_ERR_INVALID_SIZE;
-    }
-    rewind(f);
-
-    buf = (char *)calloc(1, (size_t)size + 1);
-    if (!buf) {
-        fclose(f);
-        return ESP_ERR_NO_MEM;
-    }
-
-    if (fread(buf, 1, (size_t)size, f) != (size_t)size) {
-        free(buf);
-        fclose(f);
-        return ESP_FAIL;
-    }
-    fclose(f);
-
-    if (json_parse_object(buf, &root) != ESP_OK) {
-        free(buf);
-        return ESP_ERR_INVALID_ARG;
+    err = svc_nvs_config_load_json(path, 8192, &root);
+    if (err != ESP_OK) {
+        return err;
     }
 
     (void)web_ui_json_get_string(root, "wifiSsid", cfg->wifi_ssid, sizeof(cfg->wifi_ssid));
@@ -158,7 +117,6 @@ esp_err_t web_ui_json_load_connection_cfg(const char *path, connection_cfg_t *cf
     }
 
     cJSON_Delete(root);
-    free(buf);
     return ESP_OK;
 }
 
@@ -166,10 +124,8 @@ esp_err_t web_ui_json_save_connection_cfg(const char *path,
                                           const connection_cfg_t *cfg,
                                           const char *prop_cfg_json)
 {
-    FILE *f;
     cJSON *root = NULL;
     cJSON *prop_root = NULL;
-    char *rendered = NULL;
     esp_err_t err;
 
     if (!path || !cfg || !prop_cfg_json) {
@@ -199,28 +155,12 @@ esp_err_t web_ui_json_save_connection_cfg(const char *path,
     json_add_string(root, "networkName", cfg->network_name);
     json_add_string(root, "apPassword", cfg->ap_password);
     cJSON_AddBoolToObject(root, "apEnabled", cfg->ap_enabled);
-    json_merge_object(root, prop_root);
+    svc_nvs_config_merge(root, prop_root);
 
-    rendered = cJSON_Print(root);
+    err = svc_nvs_config_save_json(path, root);
     cJSON_Delete(prop_root);
     cJSON_Delete(root);
-    if (!rendered) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    f = fopen(path, "w");
-    if (!f) {
-        cJSON_free(rendered);
-        return ESP_FAIL;
-    }
-
-    if (fputs(rendered, f) == EOF || fputc('\n', f) == EOF || fclose(f) != 0) {
-        cJSON_free(rendered);
-        return ESP_FAIL;
-    }
-
-    cJSON_free(rendered);
-    return ESP_OK;
+    return err;
 }
 
 char *web_ui_json_build_unified_config_payload(const connection_cfg_t *cfg,
@@ -265,7 +205,7 @@ char *web_ui_json_build_unified_config_payload(const connection_cfg_t *cfg,
     json_add_string(root, "networkName", cfg->network_name);
     json_add_string(root, "apPassword", cfg->ap_password);
     cJSON_AddBoolToObject(root, "apEnabled", cfg->ap_enabled);
-    json_merge_object(root, prop_root);
+    svc_nvs_config_merge(root, prop_root);
 
     payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(prop_root);

@@ -9,6 +9,12 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ### Changed
 
+- Connection-config JSON file load/save (`web_ui_json.c`) now uses the
+  shared `svc_nvs_config` component (px-components v0.4) for file I/O and
+  object merging instead of duplicating that logic inline. `prop_engine.c`'s
+  own config/battery-profile file I/O (plain `fprintf`/`fread`, not
+  cJSON-based) was left as-is — different enough in shape that converting
+  it carried more risk than value for now.
 - Battery ADC sampling + EMA smoothing moved to the shared
   `drv_battery_monitor` component (px-components v0.3). `prop_engine.c`
   keeps all voltage-divider math, chemistry-profile percent calculation,
