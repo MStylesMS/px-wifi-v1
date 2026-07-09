@@ -1,23 +1,9 @@
 #include "web_ui_json.h"
+#include "lib_json_helper.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static void copy_bounded(char *dst, size_t dst_size, const char *src)
-{
-    if (!dst || dst_size == 0) {
-        return;
-    }
-
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-
-    strncpy(dst, src, dst_size - 1);
-    dst[dst_size - 1] = '\0';
-}
 
 static void json_add_string(cJSON *object, const char *key, const char *value)
 {
@@ -32,11 +18,8 @@ static esp_err_t json_parse_object(const char *json, cJSON **out)
         return ESP_ERR_INVALID_ARG;
     }
 
-    root = cJSON_Parse(json);
-    if (!root || !cJSON_IsObject(root)) {
-        if (root) {
-            cJSON_Delete(root);
-        }
+    root = lib_json_parse(json);
+    if (!root) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -55,95 +38,48 @@ static void json_merge_object(cJSON *dst, const cJSON *src)
     }
 }
 
+/* Pure parse/extract/escape helpers now live in the shared lib_json_helper
+ * component (px-components). These wrappers keep the web_ui_json_* API
+ * stable for existing callers in this app. */
+
 cJSON *web_ui_json_parse(const char *json)
 {
-    cJSON *root = NULL;
-
-    if (json_parse_object(json, &root) != ESP_OK) {
-        return NULL;
-    }
-
-    return root;
+    return lib_json_parse(json);
 }
 
 bool web_ui_json_has_key(const cJSON *object, const char *key)
 {
-    return object && key && cJSON_GetObjectItemCaseSensitive((cJSON *)object, key) != NULL;
+    return lib_json_has_key(object, key);
 }
 
 bool web_ui_json_get_string(const cJSON *object, const char *key, char *out, size_t out_size)
 {
-    const cJSON *item;
-
-    if (!object || !key || !out || out_size == 0) {
-        return false;
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive((cJSON *)object, key);
-    if (!cJSON_IsString(item) || !item->valuestring) {
-        return false;
-    }
-
-    copy_bounded(out, out_size, item->valuestring);
-    return true;
+    return lib_json_get_string(object, key, out, out_size);
 }
 
 bool web_ui_json_get_int(const cJSON *object, const char *key, int *out)
 {
-    const cJSON *item;
-
-    if (!object || !key || !out) {
-        return false;
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive((cJSON *)object, key);
-    if (!cJSON_IsNumber(item)) {
-        return false;
-    }
-
-    *out = item->valueint;
-    return true;
+    return lib_json_get_int(object, key, out);
 }
 
 bool web_ui_json_get_bool(const cJSON *object, const char *key, bool *out)
 {
-    const cJSON *item;
-
-    if (!object || !key || !out) {
-        return false;
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive((cJSON *)object, key);
-    if (!cJSON_IsBool(item)) {
-        return false;
-    }
-
-    *out = cJSON_IsTrue(item);
-    return true;
+    return lib_json_get_bool(object, key, out);
 }
 
 bool web_ui_json_extract_string(const char *json, const char *key, char *out, size_t out_size)
 {
-    cJSON *root = web_ui_json_parse(json);
-    bool ok = web_ui_json_get_string(root, key, out, out_size);
-    cJSON_Delete(root);
-    return ok;
+    return lib_json_extract_string(json, key, out, out_size);
 }
 
 bool web_ui_json_extract_int(const char *json, const char *key, int *out)
 {
-    cJSON *root = web_ui_json_parse(json);
-    bool ok = web_ui_json_get_int(root, key, out);
-    cJSON_Delete(root);
-    return ok;
+    return lib_json_extract_int(json, key, out);
 }
 
 bool web_ui_json_extract_bool(const char *json, const char *key, bool *out)
 {
-    cJSON *root = web_ui_json_parse(json);
-    bool ok = web_ui_json_get_bool(root, key, out);
-    cJSON_Delete(root);
-    return ok;
+    return lib_json_extract_bool(json, key, out);
 }
 
 esp_err_t web_ui_json_load_connection_cfg(const char *path, connection_cfg_t *cfg)

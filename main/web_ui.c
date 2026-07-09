@@ -18,15 +18,15 @@
 #include "esp_wifi.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
-#include "mqtt_client.h"
-#include "mdns.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lib_json_helper.h"
+#include "svc_wifi.h"
+#include "svc_mqtt.h"
 
 static const char *TAG = "web_ui";
 
-static esp_err_t wifi_connect_sta(const char *ssid, const char *password);
 static bool json_extract_string_local(const char *json, const char *key, char *out, size_t out_size);
 static bool json_extract_int_local(const char *json, const char *key, int *out);
 static bool json_extract_bool_local(const char *json, const char *key, bool *out);
@@ -109,18 +109,6 @@ static const static_asset_t ASSET_LOGO = {
 };
 
 static char s_prop_id[32] = "px-wifi-v1";
-static bool s_mdns_started;
-static bool s_sta_connecting;
-static int s_sta_retry_count;
-static esp_timer_handle_t s_sta_reconnect_timer;
-static esp_timer_handle_t s_ap_shutdown_timer;
-static bool s_ap_shutdown_pending;
-static esp_mqtt_client_handle_t s_mqtt_client;
-static bool s_mqtt_connected;
-static char s_mqtt_uri[196] = "";
-static char s_sta_ip_text[32] = "";
-static int s_sta_last_disconnect_reason;
-static char s_sta_last_error[48] = "";
 
 static connection_cfg_t s_conn_cfg = WEB_UI_CONNECTION_CFG_DEFAULT;
 
@@ -184,36 +172,12 @@ static void build_default_identity(void)
 static esp_err_t apply_mdns_hostname(void)
 {
     char host[33] = {0};
-    esp_netif_t *ap_netif;
-    esp_netif_t *sta_netif;
 
     sanitize_network_name(s_conn_cfg.network_name, host, sizeof(host));
     strncpy(s_conn_cfg.network_name, host, sizeof(s_conn_cfg.network_name) - 1);
     s_conn_cfg.network_name[sizeof(s_conn_cfg.network_name) - 1] = '\0';
 
-    if (!s_mdns_started) {
-        esp_err_t err = mdns_init();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(err));
-            return err;
-        }
-        s_mdns_started = true;
-        mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-    }
-
-    ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (ap_netif) {
-        (void)esp_netif_set_hostname(ap_netif, host);
-    }
-    if (sta_netif) {
-        (void)esp_netif_set_hostname(sta_netif, host);
-    }
-
-    mdns_hostname_set(host);
-    mdns_instance_name_set(s_prop_id);
-    ESP_LOGI(TAG, "mDNS hostname set to %s.local", host);
-    return ESP_OK;
+    return svc_wifi_set_hostname(host, s_prop_id);
 }
 
 static esp_err_t read_request_body(httpd_req_t *req, char *buf, size_t buf_size)
@@ -254,75 +218,7 @@ static bool json_extract_bool_local(const char *json, const char *key, bool *out
 
 static void json_escape_string_local(const char *src, char *dst, size_t dst_size)
 {
-    static const char hex[] = "0123456789abcdef";
-    size_t w = 0;
-
-    if (!dst || dst_size == 0) {
-        return;
-    }
-
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-
-    for (size_t i = 0; src[i] != '\0' && w + 1 < dst_size; ++i) {
-        unsigned char c = (unsigned char)src[i];
-        const char *escape = NULL;
-
-        switch (c) {
-            case '"':
-                escape = "\\\"";
-                break;
-            case '\\':
-                escape = "\\\\";
-                break;
-            case '\b':
-                escape = "\\b";
-                break;
-            case '\f':
-                escape = "\\f";
-                break;
-            case '\n':
-                escape = "\\n";
-                break;
-            case '\r':
-                escape = "\\r";
-                break;
-            case '\t':
-                escape = "\\t";
-                break;
-            default:
-                break;
-        }
-
-        if (escape) {
-            size_t escape_len = strlen(escape);
-            if (w + escape_len >= dst_size) {
-                break;
-            }
-            memcpy(dst + w, escape, escape_len);
-            w += escape_len;
-            continue;
-        }
-
-        if (c < 0x20) {
-            if (w + 6 >= dst_size) {
-                break;
-            }
-            dst[w++] = '\\';
-            dst[w++] = 'u';
-            dst[w++] = '0';
-            dst[w++] = '0';
-            dst[w++] = hex[(c >> 4) & 0x0F];
-            dst[w++] = hex[c & 0x0F];
-            continue;
-        }
-
-        dst[w++] = (char)c;
-    }
-
-    dst[w] = '\0';
+    lib_json_escape_string(src, dst, dst_size);
 }
 
 static void copy_bounded_local(char *dst, size_t dst_size, const char *src)
@@ -369,18 +265,13 @@ static void mqtt_publish_state(bool retained)
     char state_json[1024];
     char topic[160];
 
-    if (!s_mqtt_client || !s_mqtt_connected) {
+    if (!svc_mqtt_is_connected()) {
         return;
     }
 
     mqtt_build_topic(topic, sizeof(topic), "state");
     prop_engine_get_state_json(state_json, sizeof(state_json));
-    esp_mqtt_client_publish(s_mqtt_client,
-                            topic,
-                            state_json,
-                            0,
-                            1,
-                            retained ? 1 : 0);
+    svc_mqtt_publish(topic, state_json, 1, retained);
 }
 
 static bool mqtt_publish_engine_events(bool publish_state_after)
@@ -389,13 +280,13 @@ static bool mqtt_publish_engine_events(bool publish_state_after)
     char topic[160];
     bool had_events = false;
 
-    if (!s_mqtt_client || !s_mqtt_connected) {
+    if (!svc_mqtt_is_connected()) {
         return false;
     }
 
     mqtt_build_topic(topic, sizeof(topic), "events");
     while (prop_engine_pop_event_json(event_json, sizeof(event_json))) {
-        esp_mqtt_client_publish(s_mqtt_client, topic, event_json, 0, 1, 0);
+        svc_mqtt_publish(topic, event_json, 1, false);
         had_events = true;
     }
 
@@ -422,7 +313,7 @@ static void mqtt_publish_announce(void)
     int battery_adc_at_0v = 0;
     int battery_adc_at_15v = 0;
 
-    if (!s_mqtt_client || !s_mqtt_connected || s_conn_cfg.mqtt_prop_announce_topic[0] == '\0') {
+    if (!svc_mqtt_is_connected() || s_conn_cfg.mqtt_prop_announce_topic[0] == '\0') {
         return;
     }
 
@@ -486,12 +377,7 @@ static void mqtt_publish_announce(void)
              state_topic,
              commands_topic);
 
-    esp_mqtt_client_publish(s_mqtt_client,
-                            s_conn_cfg.mqtt_prop_announce_topic,
-                            announce,
-                            0,
-                            1,
-                            0);
+    svc_mqtt_publish(s_conn_cfg.mqtt_prop_announce_topic, announce, 1, false);
 }
 
 static void mqtt_publish_warning(const char *message)
@@ -500,7 +386,7 @@ static void mqtt_publish_warning(const char *message)
     char topic[160];
     char warning_json[193];
 
-    if (!s_mqtt_client || !s_mqtt_connected) {
+    if (!svc_mqtt_is_connected()) {
         return;
     }
 
@@ -512,7 +398,7 @@ static void mqtt_publish_warning(const char *message)
              "{\"ts\":%lld,\"warning\":\"%s\"}",
              (long long)(esp_timer_get_time() / 1000),
              warning_json);
-    esp_mqtt_client_publish(s_mqtt_client, topic, payload, 0, 1, 0);
+    svc_mqtt_publish(topic, payload, 1, false);
 }
 
 static bool mqtt_get_follow_cfg(bool *enabled, int *tolerance_ms)
@@ -601,7 +487,7 @@ static void mqtt_publish_follow_event(const char *event,
     char payload[384];
     char topic[160];
 
-    if (!s_mqtt_client || !s_mqtt_connected) {
+    if (!svc_mqtt_is_connected()) {
         return;
     }
 
@@ -621,7 +507,7 @@ static void mqtt_publish_follow_event(const char *event,
              before_s,
              after_s,
              message ? message : "");
-    esp_mqtt_client_publish(s_mqtt_client, topic, payload, 0, 1, 0);
+    svc_mqtt_publish(topic, payload, 1, false);
 }
 
 static void mqtt_apply_follower_payload(const char *payload, int payload_len)
@@ -752,7 +638,7 @@ static void mqtt_handle_command_payload(const char *payload, int payload_len)
 
     if (prop_engine_handle_command_json(cmd_json, response, sizeof(response)) == ESP_OK) {
         mqtt_build_topic(events_topic, sizeof(events_topic), "events");
-        esp_mqtt_client_publish(s_mqtt_client, events_topic, response, 0, 1, 0);
+        svc_mqtt_publish(events_topic, response, 1, false);
         response_root = web_ui_json_parse(response);
         has_warning_message = web_ui_json_get_string(response_root, "message", warning_message, sizeof(warning_message));
         if (!has_warning_message) {
@@ -780,109 +666,68 @@ static void mqtt_handle_command_payload(const char *payload, int payload_len)
     mqtt_publish_warning("command_handle_failed");
 }
 
-static void mqtt_event_handler(void *handler_args,
-                               esp_event_base_t base,
-                               int32_t event_id,
-                               void *event_data)
+static void mqtt_on_connected(void *ctx)
 {
-    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
+    bool follow_enabled = false;
+    int unused_tol = 0;
+    char commands_topic[160];
 
-    (void)handler_args;
-    (void)base;
+    (void)ctx;
 
-    switch ((esp_mqtt_event_id_t)event_id) {
-        case MQTT_EVENT_CONNECTED:
-            {
-                bool follow_enabled = false;
-                int unused_tol = 0;
-                char commands_topic[160];
+    mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
+    svc_mqtt_subscribe(commands_topic, 1);
+    mqtt_get_follow_cfg(&follow_enabled, &unused_tol);
+    if (follow_enabled && s_conn_cfg.mqtt_game_state_topic[0] != '\0') {
+        svc_mqtt_subscribe(s_conn_cfg.mqtt_game_state_topic, 1);
+    }
+    mqtt_publish_announce();
+    mqtt_publish_state(true);
+}
 
-            s_mqtt_connected = true;
-            ESP_LOGI(TAG, "MQTT connected");
-                mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
-                esp_mqtt_client_subscribe(s_mqtt_client, commands_topic, 1);
-                mqtt_get_follow_cfg(&follow_enabled, &unused_tol);
-                if (follow_enabled && s_conn_cfg.mqtt_game_state_topic[0] != '\0') {
-                    esp_mqtt_client_subscribe(s_mqtt_client, s_conn_cfg.mqtt_game_state_topic, 1);
-                }
-            mqtt_publish_announce();
-            mqtt_publish_state(true);
-            }
-            break;
-        case MQTT_EVENT_DISCONNECTED:
-            s_mqtt_connected = false;
-            ESP_LOGW(TAG, "MQTT disconnected");
-            break;
-        case MQTT_EVENT_DATA: {
-            if (event->topic && event->data) {
-                char commands_topic[160];
-                mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
-                if (event->topic_len == (int)strlen(commands_topic) &&
-                    strncmp(event->topic, commands_topic, (size_t)event->topic_len) == 0) {
-                    mqtt_handle_command_payload(event->data, event->data_len);
-                } else if (s_conn_cfg.mqtt_game_state_topic[0] != '\0' &&
-                           event->topic_len == (int)strlen(s_conn_cfg.mqtt_game_state_topic) &&
-                           strncmp(event->topic, s_conn_cfg.mqtt_game_state_topic, (size_t)event->topic_len) == 0) {
-                    mqtt_apply_follower_payload(event->data, event->data_len);
-                }
-            }
-            break;
-        }
-        case MQTT_EVENT_ERROR:
-            ESP_LOGW(TAG, "MQTT error event");
-            break;
-        default:
-            break;
+static void mqtt_on_disconnected(void *ctx)
+{
+    (void)ctx;
+}
+
+static void mqtt_on_message(const char *topic, size_t topic_len,
+                            const char *data, size_t data_len, void *ctx)
+{
+    char commands_topic[160];
+
+    (void)ctx;
+
+    mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
+    if (topic_len == strlen(commands_topic) &&
+        strncmp(topic, commands_topic, topic_len) == 0) {
+        mqtt_handle_command_payload(data, (int)data_len);
+    } else if (s_conn_cfg.mqtt_game_state_topic[0] != '\0' &&
+               topic_len == strlen(s_conn_cfg.mqtt_game_state_topic) &&
+               strncmp(topic, s_conn_cfg.mqtt_game_state_topic, topic_len) == 0) {
+        mqtt_apply_follower_payload(data, (int)data_len);
     }
 }
 
 static void mqtt_stop_client(void)
 {
-    if (!s_mqtt_client) {
-        return;
-    }
-
-    esp_mqtt_client_stop(s_mqtt_client);
-    esp_mqtt_client_destroy(s_mqtt_client);
-    s_mqtt_client = NULL;
-    s_mqtt_connected = false;
+    svc_mqtt_stop();
 }
 
 static void mqtt_start_client(void)
 {
-    esp_mqtt_client_config_t mqtt_cfg = {0};
-
-    mqtt_stop_client();
+    svc_mqtt_config_t mqtt_cfg = SVC_MQTT_CONFIG_DEFAULT();
 
     if (s_conn_cfg.mqtt_host[0] == '\0') {
+        svc_mqtt_stop();
         ESP_LOGI(TAG, "MQTT host empty; MQTT client not started");
         return;
     }
 
-    snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "mqtt://%s:%d", s_conn_cfg.mqtt_host, s_conn_cfg.mqtt_port);
-    mqtt_cfg.broker.address.uri = s_mqtt_uri;
-    mqtt_cfg.credentials.client_id = s_prop_id;
-    mqtt_cfg.session.keepalive = 60;
-    mqtt_cfg.session.disable_clean_session = true;
-    mqtt_cfg.network.reconnect_timeout_ms = 5000;
-    if (s_conn_cfg.mqtt_username[0] != '\0') {
-        mqtt_cfg.credentials.username = s_conn_cfg.mqtt_username;
-    }
-    if (s_conn_cfg.mqtt_password[0] != '\0') {
-        mqtt_cfg.credentials.authentication.password = s_conn_cfg.mqtt_password;
-    }
-
-    s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-    if (!s_mqtt_client) {
-        ESP_LOGE(TAG, "Failed to init MQTT client");
-        return;
-    }
-
-    esp_mqtt_client_register_event(s_mqtt_client,
-                                   MQTT_EVENT_ANY,
-                                   mqtt_event_handler,
-                                   NULL);
-    esp_mqtt_client_start(s_mqtt_client);
+    mqtt_cfg.host = s_conn_cfg.mqtt_host;
+    mqtt_cfg.port = s_conn_cfg.mqtt_port;
+    mqtt_cfg.client_id = s_prop_id;
+    mqtt_cfg.username = s_conn_cfg.mqtt_username[0] != '\0' ? s_conn_cfg.mqtt_username : NULL;
+    mqtt_cfg.password = s_conn_cfg.mqtt_password[0] != '\0' ? s_conn_cfg.mqtt_password : NULL;
+    svc_mqtt_start(&mqtt_cfg);
 }
 
 static void mqtt_state_task(void *arg)
@@ -898,7 +743,7 @@ static void mqtt_state_task(void *arg)
 
         (void)mqtt_publish_engine_events(true);
 
-        if (!s_mqtt_connected) {
+        if (!svc_mqtt_is_connected()) {
             was_connected = false;
         } else if (!was_connected) {
             last_state_pub_ms = now;
@@ -909,269 +754,6 @@ static void mqtt_state_task(void *arg)
         }
 
         vTaskDelay(pdMS_TO_TICKS(500));
-    }
-}
-
-static const char *wifi_authmode_to_str(wifi_auth_mode_t authmode)
-{
-    switch (authmode) {
-        case WIFI_AUTH_OPEN:
-            return "open";
-        case WIFI_AUTH_WEP:
-            return "wep";
-        case WIFI_AUTH_WPA_PSK:
-            return "wpa-psk";
-        case WIFI_AUTH_WPA2_PSK:
-            return "wpa2-psk";
-        case WIFI_AUTH_WPA_WPA2_PSK:
-            return "wpa-wpa2-psk";
-#ifdef WIFI_AUTH_WPA2_ENTERPRISE
-        case WIFI_AUTH_WPA2_ENTERPRISE:
-            return "wpa2-enterprise";
-#endif
-#ifdef WIFI_AUTH_WPA3_PSK
-        case WIFI_AUTH_WPA3_PSK:
-            return "wpa3-psk";
-#endif
-#ifdef WIFI_AUTH_WPA2_WPA3_PSK
-        case WIFI_AUTH_WPA2_WPA3_PSK:
-            return "wpa2-wpa3-psk";
-#endif
-#ifdef WIFI_AUTH_WAPI_PSK
-        case WIFI_AUTH_WAPI_PSK:
-            return "wapi-psk";
-#endif
-#ifdef WIFI_AUTH_OWE
-        case WIFI_AUTH_OWE:
-            return "owe";
-#endif
-        default:
-            return "unknown";
-    }
-}
-
-static const char *wifi_disconnect_reason_to_str(int reason)
-{
-    switch (reason) {
-        case WIFI_REASON_AUTH_EXPIRE:
-            return "auth-expired";
-        case WIFI_REASON_AUTH_LEAVE:
-            return "auth-leave";
-        case WIFI_REASON_ASSOC_TOOMANY:
-            return "assoc-too-many";
-        case WIFI_REASON_ASSOC_LEAVE:
-            return "assoc-leave";
-        case WIFI_REASON_ASSOC_NOT_AUTHED:
-            return "assoc-not-authed";
-        case WIFI_REASON_DISASSOC_PWRCAP_BAD:
-            return "disassoc-power-cap-bad";
-        case WIFI_REASON_DISASSOC_SUPCHAN_BAD:
-            return "disassoc-channel-bad";
-        case WIFI_REASON_IE_INVALID:
-            return "ie-invalid";
-        case WIFI_REASON_MIC_FAILURE:
-            return "mic-failure";
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
-            return "4way-timeout";
-        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:
-            return "group-key-timeout";
-        case WIFI_REASON_IE_IN_4WAY_DIFFERS:
-            return "ie-4way-differs";
-        case WIFI_REASON_GROUP_CIPHER_INVALID:
-            return "group-cipher-invalid";
-        case WIFI_REASON_PAIRWISE_CIPHER_INVALID:
-            return "pairwise-cipher-invalid";
-        case WIFI_REASON_AKMP_INVALID:
-            return "akmp-invalid";
-        case WIFI_REASON_UNSUPP_RSN_IE_VERSION:
-            return "rsn-version-unsupported";
-        case WIFI_REASON_INVALID_RSN_IE_CAP:
-            return "rsn-cap-invalid";
-        case WIFI_REASON_802_1X_AUTH_FAILED:
-            return "8021x-auth-failed";
-        case WIFI_REASON_CIPHER_SUITE_REJECTED:
-            return "cipher-suite-rejected";
-        case WIFI_REASON_BEACON_TIMEOUT:
-            return "beacon-timeout";
-        case WIFI_REASON_NO_AP_FOUND:
-            return "no-ap-found";
-        case WIFI_REASON_AUTH_FAIL:
-            return "auth-failed";
-        case WIFI_REASON_ASSOC_FAIL:
-            return "assoc-failed";
-        case WIFI_REASON_HANDSHAKE_TIMEOUT:
-            return "handshake-timeout";
-#ifdef WIFI_REASON_CONNECTION_FAIL
-        case WIFI_REASON_CONNECTION_FAIL:
-            return "connection-failed";
-#endif
-#ifdef WIFI_REASON_AP_TSF_RESET
-        case WIFI_REASON_AP_TSF_RESET:
-            return "ap-tsf-reset";
-#endif
-        default:
-            return "unknown";
-    }
-}
-
-static bool wifi_authmode_is_enterprise(wifi_auth_mode_t authmode)
-{
-    switch (authmode) {
-#ifdef WIFI_AUTH_WPA2_ENTERPRISE
-        case WIFI_AUTH_WPA2_ENTERPRISE:
-            return true;
-#endif
-#ifdef WIFI_AUTH_WPA3_ENTERPRISE
-        case WIFI_AUTH_WPA3_ENTERPRISE:
-            return true;
-#endif
-#ifdef WIFI_AUTH_WPA2_WPA3_ENTERPRISE
-        case WIFI_AUTH_WPA2_WPA3_ENTERPRISE:
-            return true;
-#endif
-#ifdef WIFI_AUTH_WPA3_ENT_192
-        case WIFI_AUTH_WPA3_ENT_192:
-            return true;
-#endif
-        default:
-            return false;
-    }
-}
-
-static bool wifi_authmode_is_passwordless(wifi_auth_mode_t authmode)
-{
-    switch (authmode) {
-        case WIFI_AUTH_OPEN:
-            return true;
-#ifdef WIFI_AUTH_OWE
-        case WIFI_AUTH_OWE:
-            return true;
-#endif
-        default:
-            return false;
-    }
-}
-
-static bool wifi_lookup_ap_record(const char *ssid, wifi_ap_record_t *out)
-{
-    wifi_scan_config_t scan_cfg = {0};
-    wifi_ap_record_t *records = NULL;
-    uint16_t count = 0;
-    bool found = false;
-    int best_rssi = -127;
-
-    if (!ssid || ssid[0] == '\0' || !out) {
-        return false;
-    }
-
-    if (esp_wifi_scan_start(&scan_cfg, true) != ESP_OK) {
-        return false;
-    }
-    if (esp_wifi_scan_get_ap_num(&count) != ESP_OK || count == 0) {
-        return false;
-    }
-
-    records = (wifi_ap_record_t *)calloc(count, sizeof(*records));
-    if (!records) {
-        return false;
-    }
-
-    if (esp_wifi_scan_get_ap_records(&count, records) == ESP_OK) {
-        for (uint16_t i = 0; i < count; ++i) {
-            if (strcmp((const char *)records[i].ssid, ssid) != 0) {
-                continue;
-            }
-            if (!found || records[i].rssi > best_rssi) {
-                *out = records[i];
-                best_rssi = records[i].rssi;
-                found = true;
-            }
-        }
-    }
-
-    free(records);
-    return found;
-}
-
-static bool validate_wifi_credentials(const char *ssid, const char *password,
-                                      const wifi_ap_record_t *ap_info,
-                                      char *err_buf, size_t err_buf_size)
-{
-    size_t pass_len = password ? strlen(password) : 0;
-
-    if (!ssid || ssid[0] == '\0') {
-        return true;
-    }
-
-    if (pass_len > 64) {
-        snprintf(err_buf, err_buf_size, "WiFi password exceeds the supported 64-character limit.");
-        return false;
-    }
-
-    if (!ap_info) {
-        return true;
-    }
-
-    if (wifi_authmode_is_enterprise(ap_info->authmode)) {
-        snprintf(err_buf,
-                 err_buf_size,
-                 "SSID '%s' uses %s, which this UI does not support.",
-                 ssid,
-                 wifi_authmode_to_str(ap_info->authmode));
-        return false;
-    }
-
-    if (wifi_authmode_is_passwordless(ap_info->authmode)) {
-        if (pass_len > 0) {
-            snprintf(err_buf,
-                     err_buf_size,
-                     "SSID '%s' does not use a WiFi password.",
-                     ssid);
-            return false;
-        }
-        return true;
-    }
-
-    if (pass_len == 0) {
-        snprintf(err_buf,
-                 err_buf_size,
-                 "SSID '%s' requires a WiFi password.",
-                 ssid);
-        return false;
-    }
-
-    if (ap_info->authmode != WIFI_AUTH_WEP && pass_len < 8) {
-        snprintf(err_buf,
-                 err_buf_size,
-                 "SSID '%s' requires an 8-64 character WiFi password.",
-                 ssid);
-        return false;
-    }
-
-    return true;
-}
-
-static wifi_auth_mode_t wifi_select_sta_authmode(const wifi_ap_record_t *ap_info)
-{
-    if (!ap_info) {
-        return WIFI_AUTH_OPEN;
-    }
-
-    switch (ap_info->authmode) {
-#ifdef WIFI_AUTH_WPA2_WPA3_PSK
-        case WIFI_AUTH_WPA2_WPA3_PSK:
-            return WIFI_AUTH_WPA2_WPA3_PSK;
-#endif
-#ifdef WIFI_AUTH_WPA3_PSK
-        case WIFI_AUTH_WPA3_PSK:
-            return WIFI_AUTH_WPA3_PSK;
-#endif
-#ifdef WIFI_AUTH_OWE
-        case WIFI_AUTH_OWE:
-            return WIFI_AUTH_OWE;
-#endif
-        default:
-            return ap_info->authmode;
     }
 }
 
@@ -1428,6 +1010,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
         bool ap_val;
         if (web_ui_json_get_bool(root, "apEnabled", &ap_val)) {
             s_conn_cfg.ap_enabled = ap_val;
+            svc_wifi_set_ap_enabled(ap_val);
         }
     }
 
@@ -1473,7 +1056,6 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
     char ap_ip_text[32] = "192.168.4.1";
     char ap_ssid[33] = "Paradox-PXWiFiV1";
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    wifi_config_t ap_cfg = {0};
 
     mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
     mqtt_build_topic(state_topic, sizeof(state_topic), "state");
@@ -1487,8 +1069,11 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
         }
     }
 
-    if (esp_wifi_get_config(WIFI_IF_AP, &ap_cfg) == ESP_OK && ap_cfg.ap.ssid[0] != '\0') {
-        snprintf(ap_ssid, sizeof(ap_ssid), "%s", (const char *)ap_cfg.ap.ssid);
+    {
+        char scanned_ssid[33];
+        if (svc_wifi_get_ap_ssid(scanned_ssid, sizeof(scanned_ssid)) == ESP_OK) {
+            copy_bounded_local(ap_ssid, sizeof(ap_ssid), scanned_ssid);
+        }
     }
 
     payload = web_ui_json_build_connection_payload(&s_conn_cfg,
@@ -1555,20 +1140,20 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
         wifi_ap_record_t *ap_info_ptr = NULL;
         char validation_error[160];
 
-        if (new_wifi_ssid[0] != '\0' && wifi_lookup_ap_record(new_wifi_ssid, &ap_info)) {
+        if (new_wifi_ssid[0] != '\0' && svc_wifi_lookup_ap_record(new_wifi_ssid, &ap_info)) {
             ap_info_ptr = &ap_info;
             ESP_LOGI(TAG,
                      "Selected SSID '%s' auth=%s rssi=%d",
                      new_wifi_ssid,
-                     wifi_authmode_to_str(ap_info.authmode),
+                     svc_wifi_authmode_to_str(ap_info.authmode),
                      (int)ap_info.rssi);
         }
 
-        if (!validate_wifi_credentials(new_wifi_ssid,
-                                       new_wifi_password,
-                                       ap_info_ptr,
-                                       validation_error,
-                                       sizeof(validation_error))) {
+        if (!svc_wifi_validate_credentials(new_wifi_ssid,
+                                           new_wifi_password,
+                                           ap_info_ptr,
+                                           validation_error,
+                                           sizeof(validation_error))) {
             char err_payload[256];
 
             httpd_resp_set_status(req, "400 Bad Request");
@@ -1623,6 +1208,7 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
         bool ap_val;
         if (web_ui_json_get_bool(root, "apEnabled", &ap_val)) {
             s_conn_cfg.ap_enabled = ap_val;
+            svc_wifi_set_ap_enabled(ap_val);
         }
     }
 
@@ -1642,7 +1228,7 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
     bool connect_attempted = false;
     if (s_conn_cfg.wifi_ssid[0] != '\0') {
         connect_attempted = true;
-        wifi_ret = wifi_connect_sta(s_conn_cfg.wifi_ssid, s_conn_cfg.wifi_password);
+        wifi_ret = svc_wifi_connect_sta(s_conn_cfg.wifi_ssid, s_conn_cfg.wifi_password);
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -1676,10 +1262,8 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     bool battery_low = false;
     int64_t free_heap = (int64_t)esp_get_free_heap_size();
     const esp_app_desc_t *app = esp_app_get_description();
-    char ip_text[32] = "unavailable";
     char ap_ip_text[32] = "192.168.4.1";
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
 
     if (ap_netif) {
         esp_netif_ip_info_t ip_info;
@@ -1696,24 +1280,11 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     (void)json_extract_bool_local(state_json, "lowBattery", &battery_low);
 
     char *payload;
-    char wifi_ssid_json[64] = "";
-    int wifi_rssi = 0;
-    bool wifi_connected = false;
-    wifi_ap_record_t ap_info;
-    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-        wifi_connected = true;
-        wifi_rssi = (int)ap_info.rssi;
-        snprintf(wifi_ssid_json, sizeof(wifi_ssid_json), "%s", (const char *)ap_info.ssid);
-        if (sta_netif) {
-            esp_netif_ip_info_t sta_ip;
-            if (esp_netif_get_ip_info(sta_netif, &sta_ip) == ESP_OK) {
-                snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&sta_ip.ip));
-            }
-        }
-    }
+    svc_wifi_status_t wifi_status;
+    svc_wifi_get_status(&wifi_status);
 
     payload = web_ui_json_build_device_details_payload(s_prop_id,
-                                                       ip_text,
+                                                       wifi_status.ip_text,
                                                        app->version,
                                                        app->version,
                                                        app->date,
@@ -1726,14 +1297,14 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
                                                        s_conn_cfg.network_name,
                                                        game_state,
                                                        ap_ip_text,
-                                                       wifi_connected,
-                                                       s_sta_connecting,
+                                                       wifi_status.connected,
+                                                       wifi_status.connecting,
                                                        s_conn_cfg.wifi_ssid,
-                                                       wifi_ssid_json,
-                                                       wifi_rssi,
-                                                       s_sta_last_error,
-                                                       s_sta_last_disconnect_reason,
-                                                       s_ap_shutdown_pending);
+                                                       wifi_status.ssid,
+                                                       wifi_status.rssi,
+                                                       wifi_status.last_error,
+                                                       wifi_status.last_disconnect_reason,
+                                                       wifi_status.ap_shutdown_pending);
     if (!payload) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_ERR_NO_MEM;
@@ -1780,20 +1351,13 @@ static esp_err_t connection_scan_get_handler(httpd_req_t *req)
 {
     wifi_ap_record_t records[16];
     uint16_t count = 16;
-    wifi_scan_config_t scan_cfg = {0};
     char *payload;
     size_t pos = 0;
 
-    esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
+    esp_err_t err = svc_wifi_scan_networks(records, &count);
     if (err != ESP_OK) {
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"scanFailed\",\"networks\":[]}");
-    }
-
-    err = esp_wifi_scan_get_ap_records(&count, records);
-    if (err != ESP_OK) {
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"scanReadFailed\",\"networks\":[]}");
     }
 
     payload = (char *)calloc(1, 4096);
@@ -1812,7 +1376,7 @@ static esp_err_t connection_scan_get_handler(httpd_req_t *req)
                                 (const char *)records[i].ssid,
                                 (int)records[i].rssi,
                                 (int)records[i].authmode,
-                                wifi_authmode_to_str(records[i].authmode));
+                                svc_wifi_authmode_to_str(records[i].authmode));
         if (pos >= 4000) {
             break;
         }
@@ -1877,177 +1441,19 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return httpd_ws_send_frame(req, &out);
 }
 
-static uint32_t get_backoff_ms(int retry_count)
+static void wifi_on_sta_connected(const char *ip_text, void *ctx)
 {
-    /* 1s, 2s, 4s, 8s, 16s, 32s cap */
-    int shift = retry_count > 5 ? 5 : retry_count;
-    return 1000u << shift;
+    (void)ctx;
+    (void)ip_text;
+    mqtt_start_client();
 }
 
-static void sta_reconnect_timer_cb(void *arg)
+static void wifi_on_sta_disconnected(int reason, const char *reason_text, void *ctx)
 {
-    ESP_LOGI(TAG, "STA reconnect attempt (retry=%d)", s_sta_retry_count);
-    esp_err_t ret = esp_wifi_connect();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(ret));
-    }
-}
-
-static void ap_shutdown_timer_cb(void *arg)
-{
-    s_ap_shutdown_pending = false;
-    ESP_LOGI(TAG, "AP shutdown timer fired — switching to STA-only");
-    esp_wifi_set_mode(WIFI_MODE_STA);
-}
-
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
-        int reason = event ? (int)event->reason : 0;
-
-        s_sta_ip_text[0] = '\0';
-        s_sta_last_disconnect_reason = reason;
-        copy_bounded_local(s_sta_last_error,
-                           sizeof(s_sta_last_error),
-                           wifi_disconnect_reason_to_str(reason));
-
-        /* Cancel pending AP shutdown — we lost the STA link */
-        if (s_ap_shutdown_pending) {
-            esp_timer_stop(s_ap_shutdown_timer);
-            s_ap_shutdown_pending = false;
-        }
-
-        s_sta_connecting = (s_conn_cfg.wifi_ssid[0] != '\0');
-        s_sta_retry_count++;
-        ESP_LOGW(TAG,
-                 "STA disconnected: reason=%d (%s), retry=%d",
-                 reason,
-                 s_sta_last_error,
-                 s_sta_retry_count);
-
-        if (s_sta_connecting && s_sta_reconnect_timer) {
-            uint32_t delay_ms = get_backoff_ms(s_sta_retry_count - 1);
-            ESP_LOGI(TAG, "STA reconnect in %lu ms", (unsigned long)delay_ms);
-            esp_timer_start_once(s_sta_reconnect_timer, (uint64_t)delay_ms * 1000);
-        }
-
-        if (!s_conn_cfg.ap_enabled) {
-            ESP_LOGI(TAG, "Re-enabling AP after STA disconnect");
-            esp_wifi_set_mode(WIFI_MODE_APSTA);
-        }
-
-        mqtt_stop_client();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        s_sta_connecting = false;
-        s_sta_retry_count = 0;
-        s_sta_last_disconnect_reason = 0;
-        s_sta_last_error[0] = '\0';
-        snprintf(s_sta_ip_text, sizeof(s_sta_ip_text), IPSTR, IP2STR(&event->ip_info.ip));
-        ESP_LOGI(TAG, "STA connected, IP=%s", s_sta_ip_text);
-
-        /* Cancel any pending reconnect timer */
-        if (s_sta_reconnect_timer) {
-            esp_timer_stop(s_sta_reconnect_timer);
-        }
-
-        if (!s_conn_cfg.ap_enabled) {
-            ESP_LOGI(TAG, "Scheduling AP shutdown in 10 seconds");
-            s_ap_shutdown_pending = true;
-            esp_timer_start_once(s_ap_shutdown_timer, 10000000);
-        }
-
-        mqtt_start_client();
-    }
-}
-
-static esp_err_t wifi_connect_sta(const char *ssid, const char *password)
-{
-    wifi_ap_record_t ap_info;
-    wifi_ap_record_t *ap_info_ptr = NULL;
-    if (!ssid || ssid[0] == '\0') {
-        ESP_LOGW(TAG, "wifi_connect_sta: empty SSID, skipping");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (wifi_lookup_ap_record(ssid, &ap_info)) {
-        ap_info_ptr = &ap_info;
-    }
-
-    wifi_config_t sta_cfg = {0};
-    strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
-    if (password && password[0] != '\0') {
-        strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
-    }
-    sta_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-    sta_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-    sta_cfg.sta.threshold.authmode = wifi_select_sta_authmode(ap_info_ptr);
-    sta_cfg.sta.pmf_cfg.capable = true;
-    sta_cfg.sta.pmf_cfg.required = false;
-#ifdef CONFIG_ESP_WIFI_ENABLE_WPA3_SAE
-    sta_cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-#endif
-
-    ESP_LOGI(TAG,
-             "STA connecting to '%s' (auth=%s)",
-             ssid,
-             ap_info_ptr ? wifi_authmode_to_str(ap_info_ptr->authmode) : "unknown");
-    s_sta_connecting = true;
-    s_sta_retry_count = 0;
-    s_sta_ip_text[0] = '\0';
-    s_sta_last_disconnect_reason = 0;
-    s_sta_last_error[0] = '\0';
-    if (s_sta_reconnect_timer) {
-        esp_timer_stop(s_sta_reconnect_timer);
-    }
-
-    esp_wifi_disconnect();
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-    return esp_wifi_connect();
-}
-
-static esp_err_t start_softap(void)
-{
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-
-    uint8_t mac[6];
-    ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_AP, mac));
-
-    wifi_config_t ap_cfg = {
-        .ap = {
-            .ssid_len = 0,
-            .channel = 1,
-            .password = "",
-            .max_connection = 4,
-            .authmode = WIFI_AUTH_OPEN,
-            .pmf_cfg = {
-                .required = false,
-            },
-        },
-    };
-
-    snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "Paradox-PXWiFiV1-%02X%02X", mac[4], mac[5]);
-
-    if (s_conn_cfg.ap_password[0] != '\0') {
-        strncpy((char *)ap_cfg.ap.password, s_conn_cfg.ap_password, sizeof(ap_cfg.ap.password) - 1);
-        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    }
-
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    build_default_identity();
-    (void)apply_mdns_hostname();
-
-    ESP_LOGI(TAG, "SoftAP started: SSID=%s", ap_cfg.ap.ssid);
-    ESP_LOGI(TAG, "Browse to http://192.168.4.1/");
-
-    return ESP_OK;
+    (void)ctx;
+    (void)reason;
+    (void)reason_text;
+    mqtt_stop_client();
 }
 
 esp_err_t web_ui_start(void)
@@ -2068,33 +1474,31 @@ esp_err_t web_ui_start(void)
         }
     }
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_ap();
-    esp_netif_create_default_wifi_sta();
-
-    /* Create timers before registering event handlers */
     {
-        esp_timer_create_args_t reconnect_args = {
-            .callback = sta_reconnect_timer_cb,
-            .name = "sta_reconnect",
-        };
-        ESP_ERROR_CHECK(esp_timer_create(&reconnect_args, &s_sta_reconnect_timer));
+        uint8_t mac[6] = {0};
+        char ap_ssid[33];
+        svc_wifi_config_t wifi_cfg = SVC_WIFI_CONFIG_DEFAULT();
 
-        esp_timer_create_args_t ap_shutdown_args = {
-            .callback = ap_shutdown_timer_cb,
-            .name = "ap_shutdown",
-        };
-        ESP_ERROR_CHECK(esp_timer_create(&ap_shutdown_args, &s_ap_shutdown_timer));
+        (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        snprintf(ap_ssid, sizeof(ap_ssid), "Paradox-PXWiFiV1-%02X%02X", mac[4], mac[5]);
+        wifi_cfg.ap_ssid = ap_ssid;
+        wifi_cfg.ap_password = s_conn_cfg.ap_password;
+        wifi_cfg.ap_enabled = s_conn_cfg.ap_enabled;
+
+        ESP_ERROR_CHECK(svc_wifi_init(&wifi_cfg));
     }
 
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
+    svc_wifi_set_sta_connected_cb(wifi_on_sta_connected, NULL);
+    svc_wifi_set_sta_disconnected_cb(wifi_on_sta_disconnected, NULL);
+    svc_mqtt_set_connected_cb(mqtt_on_connected, NULL);
+    svc_mqtt_set_disconnected_cb(mqtt_on_disconnected, NULL);
+    svc_mqtt_set_message_cb(mqtt_on_message, NULL);
 
-    ESP_ERROR_CHECK(start_softap());
+    build_default_identity();
+    (void)apply_mdns_hostname();
 
     if (s_conn_cfg.wifi_ssid[0] != '\0') {
-        esp_err_t wifi_ret = wifi_connect_sta(s_conn_cfg.wifi_ssid, s_conn_cfg.wifi_password);
+        esp_err_t wifi_ret = svc_wifi_connect_sta(s_conn_cfg.wifi_ssid, s_conn_cfg.wifi_password);
         if (wifi_ret != ESP_OK) {
             ESP_LOGW(TAG, "Auto-connect to saved SSID failed: %s", esp_err_to_name(wifi_ret));
         }

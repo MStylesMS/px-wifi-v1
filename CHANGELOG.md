@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Version numbers correspond to the contents of `version.txt`, which ESP-IDF
 embeds into the firmware build (`esp_app_desc_t.version`).
 
+## [Unreleased]
+
+### Changed
+
+- Refactored WiFi/MQTT/JSON-helper code out of `web_ui.c` / `web_ui_json.c`
+  and into the shared `px-components` library (`svc_wifi`, `svc_mqtt`,
+  `lib_json_helper` — px-components v0.2). No behavior change intended;
+  `web_ui.c` now calls through the new component APIs instead of touching
+  `esp_wifi`/`esp_mqtt_client`/mDNS directly. Pending on-device OTA
+  validation before the next version bump.
+- Added `PX_COMPONENTS_VERSION` to record the px-components release this
+  project is built/validated against.
+
 ## [0.1] - 2026-07-08
 
 ### Added
