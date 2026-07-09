@@ -9,6 +9,10 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ### Changed
 
+- OTA firmware upload (`ota_upload_post_handler`) now delegates to the
+  shared `svc_ota` component (px-components v0.5) via a small
+  `httpd_req_recv` read-callback adapter, instead of driving
+  `esp_ota_ops` directly.
 - Connection-config JSON file load/save (`web_ui_json.c`) now uses the
   shared `svc_nvs_config` component (px-components v0.4) for file I/O and
   object merging instead of duplicating that logic inline. `prop_engine.c`'s

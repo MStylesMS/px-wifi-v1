@@ -13,7 +13,6 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
-#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
@@ -24,6 +23,7 @@
 #include "lib_json_helper.h"
 #include "svc_wifi.h"
 #include "svc_mqtt.h"
+#include "svc_ota.h"
 
 static const char *TAG = "web_ui";
 
@@ -874,60 +874,28 @@ static void ota_reboot_task(void *arg)
     esp_restart();
 }
 
+static int ota_read_from_httpd_req(void *ctx, uint8_t *buf, size_t buf_size)
+{
+    httpd_req_t *req = (httpd_req_t *)ctx;
+    return httpd_req_recv(req, (char *)buf, buf_size);
+}
+
 static esp_err_t ota_upload_post_handler(httpd_req_t *req)
 {
-    const esp_partition_t *update_partition;
-    esp_ota_handle_t ota_handle = 0;
     esp_err_t err;
-    char buf[1024];
-    int remaining;
 
     if (req->content_len <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing firmware payload");
         return ESP_FAIL;
     }
 
-    update_partition = esp_ota_get_next_update_partition(NULL);
-    if (!update_partition) {
+    err = svc_ota_apply((size_t)req->content_len, ota_read_from_httpd_req, req);
+    if (err == ESP_ERR_NOT_FOUND) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition");
-        return ESP_FAIL;
-    }
-
-    err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
-    if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
         return err;
     }
-
-    remaining = req->content_len;
-    while (remaining > 0) {
-        int to_read = remaining > (int)sizeof(buf) ? (int)sizeof(buf) : remaining;
-        int received = httpd_req_recv(req, buf, to_read);
-        if (received <= 0) {
-            esp_ota_abort(ota_handle);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA upload interrupted");
-            return ESP_FAIL;
-        }
-
-        err = esp_ota_write(ota_handle, (const void *)buf, (size_t)received);
-        if (err != ESP_OK) {
-            esp_ota_abort(ota_handle);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA write failed");
-            return err;
-        }
-
-        remaining -= received;
-    }
-
-    err = esp_ota_end(ota_handle);
     if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA finalize failed");
-        return err;
-    }
-
-    err = esp_ota_set_boot_partition(update_partition);
-    if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA boot partition failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA update failed");
         return err;
     }
 
