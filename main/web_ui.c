@@ -598,20 +598,15 @@ static bool mqtt_publish_engine_events(bool publish_state_after)
 static void mqtt_publish_announce(void)
 {
     char announce[1024];
-    char prop_cfg[2048];
     char state_topic[160];
     char commands_topic[160];
     char announce_topic[sizeof(s_conn_cfg.mqtt_prop_announce_topic)];
     char host[33] = {0};
     char network_name[sizeof(s_conn_cfg.network_name)];
     char ip_text[32] = "unavailable";
-    char battery_profile[32] = "unknown";
+    prop_battery_snapshot_t battery_snap;
     esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     const esp_app_desc_t *app = esp_app_get_description();
-    int wire_count = 0;
-    int battery_adc_raw = 0;
-    int battery_adc_at_0v = 0;
-    int battery_adc_at_15v = 0;
 
     if (!svc_mqtt_is_connected()) {
         return;
@@ -637,15 +632,7 @@ static void mqtt_publish_announce(void)
         }
     }
 
-    prop_engine_get_config_json(prop_cfg, sizeof(prop_cfg));
-    (void)json_extract_int_local(prop_cfg, "wireCount", &wire_count);
-    (void)json_extract_int_local(prop_cfg, "batteryAdcRaw", &battery_adc_raw);
-    (void)json_extract_int_local(prop_cfg, "batteryAdcAt0V", &battery_adc_at_0v);
-    (void)json_extract_int_local(prop_cfg, "batteryAdcAt15V", &battery_adc_at_15v);
-    (void)json_extract_string_local(prop_cfg,
-                                    "batteryProfile",
-                                    battery_profile,
-                                    sizeof(battery_profile));
+    prop_engine_get_battery_snapshot(&battery_snap);
 
     sanitize_network_name(network_name, host, sizeof(host));
     snprintf(announce,
@@ -675,11 +662,11 @@ static void mqtt_publish_announce(void)
              s_prop_id,
              ip_text,
              host,
-             wire_count,
-             battery_adc_raw,
-             battery_adc_at_0v,
-             battery_adc_at_15v,
-             battery_profile,
+             battery_snap.wire_count,
+             battery_snap.battery_adc_raw,
+             battery_snap.battery_adc_at_0v,
+             battery_snap.battery_adc_at_15v,
+             battery_snap.battery_profile,
              prop_led_hint_name_local(prop_engine_get_led_hint()),
              app->version,
              app->version,

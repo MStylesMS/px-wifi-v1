@@ -76,6 +76,14 @@ typedef struct {
     char failed[PROP_BUZZER_MML_MAX_LEN];
 } prop_buzzer_mml_config_t;
 
+typedef struct {
+    int wire_count;
+    int battery_adc_raw;
+    int battery_adc_at_0v;
+    int battery_adc_at_15v;
+    char battery_profile[24];
+} prop_battery_snapshot_t;
+
 esp_err_t prop_engine_init(void);
 
 /* Optional hook invoked immediately before low-battery deep sleep so the
@@ -94,4 +102,5 @@ esp_err_t prop_engine_restore_defaults(bool persist, char *response, size_t resp
 prop_led_hint_t prop_engine_get_led_hint(void);
 void prop_engine_get_buzzer_mml_config(prop_buzzer_mml_config_t *out);
 void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out);
+void prop_engine_get_battery_snapshot(prop_battery_snapshot_t *out);
 bool prop_engine_pop_event_json(char *out, size_t out_size);

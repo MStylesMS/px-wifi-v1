@@ -9,6 +9,17 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ### Security / Fixed
 
+- `prop_engine.c`/`.h`: added `prop_engine_get_battery_snapshot()`, a
+  direct-field getter for the handful of scalars (`wireCount`,
+  `batteryAdcRaw`, `batteryAdcAt0V`, `batteryAdcAt15V`, `batteryProfile`)
+  that `web_ui.c`'s `mqtt_publish_announce()` needed. It previously called
+  `prop_engine_get_config_json()` into a 2KB stack buffer and parsed those
+  same values back out of the resulting JSON, just to avoid a getter —
+  wasteful and, combined with the function's other ~1KB `announce` buffer,
+  left `mqtt_publish_announce()` using ~3KB of stack on the esp-mqtt
+  client's own (unsized-by-us) task. Removing the JSON round-trip cuts
+  that to ~1KB.
+
 - `web_ui.c`: `apply_connection_fields_from_json` now trims leading/trailing
   whitespace from `wifiPassword` before validating/saving it. A stray space
   (e.g. from a phone keyboard's autocapitalize/autocorrect, or a copy-paste)

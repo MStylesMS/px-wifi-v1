@@ -2186,6 +2186,27 @@ void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out)
     prop_unlock();
 }
 
+/* Cheap direct-field snapshot for callers (e.g. MQTT announce) that only
+ * need a handful of battery/wire scalars, avoiding a full JSON
+ * serialize-then-parse round trip through prop_engine_get_config_json(). */
+void prop_engine_get_battery_snapshot(prop_battery_snapshot_t *out)
+{
+    if (!out) {
+        return;
+    }
+
+    if (!prop_lock()) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    out->wire_count = s_ctx.cfg.wire_count;
+    out->battery_adc_raw = s_ctx.battery_adc_raw;
+    out->battery_adc_at_0v = s_ctx.battery_adc_at_0v;
+    out->battery_adc_at_15v = s_ctx.battery_adc_at_15v;
+    copy_bounded(out->battery_profile, sizeof(out->battery_profile), s_ctx.battery_profile);
+    prop_unlock();
+}
+
 bool prop_engine_pop_event_json(char *out, size_t out_size)
 {
     prop_event_t event;
