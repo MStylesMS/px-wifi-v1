@@ -78,6 +78,11 @@ typedef struct {
 
 esp_err_t prop_engine_init(void);
 
+/* Optional hook invoked immediately before low-battery deep sleep so the
+ * application can power down LEDs, display, buzzer, etc. */
+typedef void (*prop_deep_sleep_prepare_fn_t)(void);
+void prop_engine_set_deep_sleep_prepare_handler(prop_deep_sleep_prepare_fn_t fn);
+
 void prop_engine_get_state_json(char *out, size_t out_size);
 void prop_engine_get_config_json(char *out, size_t out_size);
 void prop_engine_get_default_config_json(char *out, size_t out_size);

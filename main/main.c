@@ -190,11 +190,21 @@ static rgb_color_t led_color_for_hint(prop_led_hint_t hint, int64_t t_ms)
     }
 }
 
+static volatile bool s_outputs_powered_down;
+static void prepare_for_deep_sleep(void);
+
 static void led_task(void *arg)
 {
     (void)arg;
 
     while (true) {
+        if (s_outputs_powered_down) {
+            const rgb_color_t off = {0, 0, 0};
+            (void)drv_rgb_led_set(0, off);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
         prop_led_hint_t hint = prop_engine_get_led_hint();
         int64_t t_ms = esp_timer_get_time() / 1000;
         rgb_color_t c = led_color_for_hint(hint, t_ms);
@@ -451,6 +461,12 @@ static void display_task(void *arg)
         int64_t now_ms = esp_timer_get_time() / 1000;
         bool colon_on_1hz = ((now_ms / 1000) % 2) == 0;
         uint32_t refresh_ms = 100;  /* default faster refresh */
+
+        if (s_outputs_powered_down) {
+            /* Stay idle after low-battery power-down; do not re-wake display. */
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
 
         prop_engine_get_runtime_snapshot(&snap);
 
@@ -834,6 +850,46 @@ static void buzzer_set(bool on, uint32_t freq_hz, uint16_t duty)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
+/* Blank the HT16K33 and put it into standby (display off, oscillator off)
+ * so the 7-segment backpack stops drawing current during deep sleep. */
+static void display_power_down(void)
+{
+    uint16_t blank[8];
+
+    if (!s_display_ready) {
+        return;
+    }
+
+    memset(blank, 0, sizeof(blank));
+    (void)display_i2c_write_frame(blank);
+    (void)display_i2c_write_cmd(0x80);  /* display off, no blink */
+    (void)display_i2c_write_cmd(0x20);  /* system oscillator off / standby */
+}
+
+/* Turn off RGB status LED, 7-segment display, and buzzer immediately before
+ * low-battery deep sleep. Also latches s_outputs_powered_down so the LED /
+ * display / buzzer tasks stop re-enabling them while we wind down. */
+static void prepare_for_deep_sleep(void)
+{
+    const rgb_color_t off = {0, 0, 0};
+    int i;
+
+    s_outputs_powered_down = true;
+
+    /* Silence buzzer PWM first — cheap and independent of I2C/RMT. */
+    s_player.active = false;
+    buzzer_set(false, 0, 0);
+
+    /* Clear every configured RGB LED (status + any aux strip LEDs). */
+    for (i = 0; i < BOARD_RGB_LED_COUNT; ++i) {
+        (void)drv_rgb_led_set(i, off);
+    }
+
+    display_power_down();
+
+    ESP_LOGI(TAG, "Outputs powered down for deep sleep (LEDs + display + buzzer)");
+}
+
 static void buzzer_play_mml(const char *mml)
 {
     if (!parse_mml_song(mml, s_player.notes, BUZZER_MAX_NOTES, &s_player.len)) {
@@ -892,6 +948,13 @@ static void buzzer_task(void *arg)
     prop_buzzer_mml_config_t buzzer_cfg;
 
     while (true) {
+        if (s_outputs_powered_down) {
+            s_player.active = false;
+            buzzer_set(false, 0, 0);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
         prop_led_hint_t hint = prop_engine_get_led_hint();
         int64_t         t_ms = esp_timer_get_time() / 1000;
 
@@ -978,13 +1041,16 @@ static void IRAM_ATTR wire_gpio_isr_handler(void *arg)
 /* Configure GPIO edge detection on wire inputs for light sleep wake */
 static void init_wire_gpio_interrupts(void)
 {
-    /* Wire inputs are typically GPIO3-GPIO6 on ESP32-S3 DevKitC-1 */
-    const int wire_gpios[] = {3, 4, 5, 6};
+    /* Must match s_wire_input_gpios[] in prop_engine.c / docs/pin-mapping.md.
+     * All wire + lid inputs need wake capability so a disconnect during light
+     * sleep is observed promptly. */
+    const int wire_gpios[] = {4, 5, 6, 7, 15, 16, 17, 18};
+    const int wire_gpio_count = (int)(sizeof(wire_gpios) / sizeof(wire_gpios[0]));
     int i;
 
     gpio_install_isr_service(0);
-    
-    for (i = 0; i < 4; ++i) {
+
+    for (i = 0; i < wire_gpio_count; ++i) {
         gpio_isr_handler_add(wire_gpios[i], wire_gpio_isr_handler, (void *)(intptr_t)i);
         /* Trigger on HIGH (wire disconnect = logic HIGH) */
         gpio_set_intr_type(wire_gpios[i], GPIO_INTR_POSEDGE);
@@ -1009,6 +1075,9 @@ void app_main(void)
     ESP_ERROR_CHECK(drv_rgb_led_init(&led_cfg));
 
     ESP_ERROR_CHECK(prop_engine_init());
+    /* Register before any battery-cutoff path can fire so LEDs/display are
+     * blanked before deep sleep. */
+    prop_engine_set_deep_sleep_prepare_handler(prepare_for_deep_sleep);
     xTaskCreate(led_task, "led_status", 3072, NULL, 5, NULL);
 
     init_buzzer();

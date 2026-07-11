@@ -7,8 +7,92 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ## [Unreleased]
 
+### Security / Fixed
+
+- `web_ui.c`: `apply_connection_fields_from_json` now trims leading/trailing
+  whitespace from `wifiPassword` before validating/saving it. A stray space
+  (e.g. from a phone keyboard's autocapitalize/autocorrect, or a copy-paste)
+  previously associated with the AP fine but silently failed the WPA2
+  4-way handshake with no indication the password itself was the problem.
+- `web_ui.c`: replaced `ESP_ERROR_CHECK()` (which aborts/reboots the whole
+  device) in `command_post_handler`/`config_post_handler`/
+  `config_restore_post_handler`/`ws_handler` with proper `esp_err_t`
+  handling — an attacker-controlled or malformed request/command can no
+  longer crash the prop; a busy engine now returns HTTP 503 / a WS error
+  reply instead.
+- `main.c`: `init_wire_gpio_interrupts()` now installs interrupts on the
+  correct wire input GPIOs (`4,5,6,7,15,16,17,18`, matching
+  `prop_engine.c`'s `s_wire_input_gpios[]` and
+  `docs/pin-mapping.md`) instead of a stale/incorrect pin list.
+- `web_ui.c`: `connection_scan_get_handler` now JSON-escapes scanned SSIDs
+  before embedding them in the response, closing a JSON-injection hole
+  where a rogue AP could broadcast an SSID containing `"`/control
+  characters to corrupt the scan response or inject fields.
+- `web_ui.c`: `config_post_handler` now applies WiFi credential changes
+  (via the same validated path as `/api/connection`) and reconnects STA
+  when the SSID/password change, instead of silently accepting but never
+  applying new WiFi credentials submitted through `/api/config`.
+- `web_ui.c`: `device_name_post_handler` now persists the updated network
+  name to NVS/SPIFFS immediately instead of only holding it in RAM (lost
+  on reboot).
+- `web_ui.c`: all reads/writes of the shared `s_conn_cfg` connection
+  config are now protected by a mutex (`s_conn_cfg_mutex`,
+  `conn_cfg_lock`/`unlock`/`snapshot`) instead of being accessed
+  unsynchronized from the HTTP server task, MQTT client task, and WiFi
+  event callbacks concurrently.
+- `web_ui.c`: MQTT inbound command/game-state-follower handling is now
+  offloaded from `mqtt_on_message` (the MQTT client's own event task) to
+  a dedicated `mqtt_inbound_worker` task via a queue, so slow command
+  processing/publishes can no longer stall MQTT keepalive/reconnect.
+- `web_ui.c`: `/api/config` and `/api/connection` POST handlers now share
+  a single `apply_connection_fields_from_json()` helper for validating
+  and applying WiFi/MQTT/network-name/AP fields, removing the previous
+  duplicated (and inconsistent) logic between the two endpoints.
+- SoftAP is now left enabled even after the device connects to a local
+  WiFi network (previously it could be disabled via `apEnabled`/config).
+  The AP's WPA2 PSK is relied on to keep it from being accessed by
+  unauthorized parties; `apply_connection_fields_from_json` now forces
+  `ap_enabled = true` and ignores client attempts to disable it.
+- `PX_COMPONENTS_VERSION` bumped to 0.81 (see px-components CHANGELOG for
+  the `svc_mqtt_publish` fix below).
+- `web_ui.c`: all 6 previously fire-and-forget `svc_mqtt_publish()` call
+  sites now go through a new `mqtt_publish_or_warn()` wrapper that logs a
+  warning when the publish is dropped, completing the caller side of the
+  `svc_mqtt_publish()` return-value fix (px-components v0.81) — the
+  component-side fix alone was a no-op here since nothing checked the
+  return value.
+- `CONFIG_ESP_MAIN_TASK_STACK_SIZE` raised from the ESP-IDF default
+  (3584) to 8192 in `sdkconfig.defaults`. `web_ui_start()` runs
+  synchronously on the "main" task during boot and its locals (a 4KB
+  `prop_cfg` buffer, `wifi_config_t`, connection-config snapshots, etc.)
+  overflowed the default stack right as `esp_wifi_init()` added its own
+  frames on top, causing a boot loop.
+
+### Changed
+
+
+- `prop_engine.c`: retuned built-in `6v-lead-acid` and `12v-lead-acid`
+  voltage→capacity curves for light continuous load (ESP32 + roughly half
+  the LEDs on), rather than open-circuit resting voltage. Full is now
+  6.40 V / 12.80 V and empty is 5.75 V / 11.50 V, with a smoother mid-band
+  that better matches expected prop runtime under light load.
+- Low-battery deep sleep now powers down the RGB status LED(s), HT16K33
+  7-segment display (blank + oscillator standby), and buzzer before
+  `esp_deep_sleep_start()`, so they do not keep drawing current while the
+  MCU sleeps. `main.c` registers a prepare hook via
+  `prop_engine_set_deep_sleep_prepare_handler()`.
+
 ### Fixed
 
+- `prop_engine.c`: raised `BATTERY_USB_ONLY_THRESHOLD_MV` from 400 to 2500 mV
+  and made `timer_task()` skip both the zero-percent and low-battery-cutoff
+  deep-sleep triggers whenever `battery_state == BATTERY_STATE_USB`. Running
+  on USB power alone (no battery pack connected) previously read as a 0%
+  battery, which satisfied the low-battery cutoff after 15s and forced the
+  device into deep sleep shortly after boot — killing the SoftAP before a
+  phone could discover/join it, and (if a wake GPIO was floating) presenting
+  as a fast reset loop. No real battery voltage sags anywhere near 2.5V while
+  still connected, so a reading below that reliably means "no pack attached."
 - `prop_engine.c`: `init_battery_adc()` now also configures
   `drv_battery_monitor`'s median-of-5 pre-filter and a sustained-drop
   override (px-components v0.8) — snaps the filtered battery reading
@@ -26,6 +110,16 @@ embeds into the firmware build (`esp_app_desc_t.version`).
   ~1.1s (both measured against captured device data, well within the
   <=5s requirement).
 - `PX_COMPONENTS_VERSION` bumped to 0.8 for the above.
+
+### Reverted
+
+- Removed the short-lived `CONFIG_BOARD_DEVKITC1_V11` sdkconfig option:
+  closer inspection showed this v2 (dual USB-C) devkit is an off-brand
+  board whose WS2812 status LED is on GPIO48, same as the original board,
+  not GPIO38 as on genuine Espressif DevKitC-1 v1.1 hardware. The Kconfig
+  option and `board_devkitc1/include/board.h` `#ifdef` added for it have
+  been reverted; the board is listed simply as the original DevKitC-1
+  (GPIO48) again.
 
 ### Added
 

@@ -3,3 +3,9 @@ CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+# app_main() runs WiFi/HTTP init synchronously on the "main" task (see
+# web_ui_start()); the ESP-IDF default of 3584 bytes overflows there once
+# esp_wifi_init() adds its own stack frames on top of web_ui_start()'s
+# locals (connection_cfg_t snapshots, wifi_config_t, etc.), causing a boot
+# loop. 8192 gives a safe margin.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

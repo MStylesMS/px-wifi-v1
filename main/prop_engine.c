@@ -94,7 +94,7 @@ static const gpio_num_t s_battery_sense_gpio = GPIO_NUM_9;
  * all (e.g. running on USB power only, no battery attached). Note some
  * features (LED, buzzer) are powered from the battery rail, not USB, so this
  * is reported as "usb" rather than assuming everything still works. */
-#define BATTERY_USB_ONLY_THRESHOLD_MV 400
+#define BATTERY_USB_ONLY_THRESHOLD_MV 2500
 #define LOW_BATTERY_CUTOFF_DELAY_MS 15000
 #define DEEP_SLEEP_WAKE_GPIO GPIO_NUM_4
 #define RESULT_RESET_DELAY_S 60
@@ -128,13 +128,18 @@ typedef struct {
     battery_point_t points[BATTERY_MAX_POINTS];
 } battery_profile_builtin_t;
 
+/* Lead-acid curves are tuned for light continuous load (ESP32 + half of the
+ * status/display LEDs on), not open-circuit resting voltage and not heavy
+ * C/5-C/10 discharge. Under that load the pack sags only a little, so the
+ * table sits slightly below typical OCV charts at the top and uses a
+ * conservative empty point around 5.75 V / 11.50 V. */
 static const battery_profile_builtin_t s_builtin_profiles[] = {
     {
         .name = "6v-lead-acid",
         .count = 8,
         .points = {
-            {6600, 100}, {6450, 95}, {6350, 85}, {6250, 70},
-            {6150, 55}, {6050, 35}, {5950, 15}, {5850, 0},
+            {6400, 100}, {6300, 90}, {6220, 75}, {6140, 60},
+            {6060, 45}, {5980, 30}, {5900, 15}, {5750, 0},
         },
     },
     {
@@ -149,8 +154,8 @@ static const battery_profile_builtin_t s_builtin_profiles[] = {
         .name = "12v-lead-acid",
         .count = 8,
         .points = {
-            {13200, 100}, {12900, 95}, {12700, 84}, {12500, 70},
-            {12300, 55}, {12100, 35}, {11900, 15}, {11700, 0},
+            {12800, 100}, {12600, 90}, {12440, 75}, {12280, 60},
+            {12120, 45}, {11960, 30}, {11800, 15}, {11500, 0},
         },
     },
     {
@@ -215,6 +220,7 @@ typedef struct {
 } prop_ctx_t;
 
 static prop_ctx_t s_ctx;
+static prop_deep_sleep_prepare_fn_t s_deep_sleep_prepare_fn;
 
 static void prop_engine_get_state_json_unlocked(char *out, size_t out_size);
 static void handle_disconnect_unlocked(int idx);
@@ -225,6 +231,11 @@ static bool json_extract_string(const char *json, const char *key, char *out, si
 static bool json_extract_int(const char *json, const char *key, int *out);
 static int clamp_int(int value, int min_v, int max_v);
 static int battery_drop_threshold_raw_for_mv(int mv);
+
+void prop_engine_set_deep_sleep_prepare_handler(prop_deep_sleep_prepare_fn_t fn)
+{
+    s_deep_sleep_prepare_fn = fn;
+}
 
 #define PROP_LOCK_TIMEOUT_MS 5000
 
@@ -1811,28 +1822,36 @@ static void timer_task(void *arg)
                 last_log_ms = now;
             }
 
-            if (s_ctx.battery_percent <= 0) {
-                if (s_ctx.battery_zero_since_ms == 0) {
-                    s_ctx.battery_zero_since_ms = now;
-                }
-                if ((now - s_ctx.battery_zero_since_ms) >=
-                    (int64_t)s_ctx.battery_shutdown_delay_s * 1000) {
-                    should_deep_sleep = true;
-                }
-            } else {
+            if (s_ctx.battery_state == BATTERY_STATE_USB) {
+                /* No battery attached at all (running on USB power only) --
+                 * a 0% reading here just means "no pack detected", not a
+                 * real low-battery condition, so never deep-sleep for it. */
                 s_ctx.battery_zero_since_ms = 0;
-            }
-
-            if (s_ctx.low_battery_cutoff_percent > 0 &&
-                s_ctx.battery_percent <= s_ctx.low_battery_cutoff_percent) {
-                if (s_ctx.battery_cutoff_since_ms == 0) {
-                    s_ctx.battery_cutoff_since_ms = now;
-                }
-                if ((now - s_ctx.battery_cutoff_since_ms) >= LOW_BATTERY_CUTOFF_DELAY_MS) {
-                    should_deep_sleep = true;
-                }
-            } else {
                 s_ctx.battery_cutoff_since_ms = 0;
+            } else {
+                if (s_ctx.battery_percent <= 0) {
+                    if (s_ctx.battery_zero_since_ms == 0) {
+                        s_ctx.battery_zero_since_ms = now;
+                    }
+                    if ((now - s_ctx.battery_zero_since_ms) >=
+                        (int64_t)s_ctx.battery_shutdown_delay_s * 1000) {
+                        should_deep_sleep = true;
+                    }
+                } else {
+                    s_ctx.battery_zero_since_ms = 0;
+                }
+
+                if (s_ctx.low_battery_cutoff_percent > 0 &&
+                    s_ctx.battery_percent <= s_ctx.low_battery_cutoff_percent) {
+                    if (s_ctx.battery_cutoff_since_ms == 0) {
+                        s_ctx.battery_cutoff_since_ms = now;
+                    }
+                    if ((now - s_ctx.battery_cutoff_since_ms) >= LOW_BATTERY_CUTOFF_DELAY_MS) {
+                        should_deep_sleep = true;
+                    }
+                } else {
+                    s_ctx.battery_cutoff_since_ms = 0;
+                }
             }
         }
 
@@ -1850,6 +1869,13 @@ static void timer_task(void *arg)
                 ESP_LOGW(TAG, "Battery reached 0%% for %d seconds, entering deep sleep",
                          s_ctx.battery_shutdown_delay_s);
             }
+
+            /* Power down LEDs/display/buzzer before sleep so they do not keep
+             * drawing current while the MCU is in deep sleep. */
+            if (s_deep_sleep_prepare_fn) {
+                s_deep_sleep_prepare_fn();
+            }
+
             configure_deep_sleep_wake_gpio();
             vTaskDelay(pdMS_TO_TICKS(100));
             esp_deep_sleep_start();
