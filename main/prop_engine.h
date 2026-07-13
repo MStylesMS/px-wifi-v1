@@ -104,3 +104,19 @@ void prop_engine_get_buzzer_mml_config(prop_buzzer_mml_config_t *out);
 void prop_engine_get_runtime_snapshot(prop_runtime_snapshot_t *out);
 void prop_engine_get_battery_snapshot(prop_battery_snapshot_t *out);
 bool prop_engine_pop_event_json(char *out, size_t out_size);
+
+/* WiFi event notifications */
+void prop_engine_notify_wifi_connected(int rssi);
+void prop_engine_notify_wifi_disconnected(void);
+
+/* Internal buzzer events (called from web_ui or prop_engine itself) */
+typedef enum {
+    PROP_BUZZER_EVENT_NONE = 0,
+    PROP_BUZZER_EVENT_WIFI_CONNECTED,
+    PROP_BUZZER_EVENT_WIFI_LOST,
+    PROP_BUZZER_EVENT_LOW_BATTERY,
+    PROP_BUZZER_EVENT_SHUTDOWN,
+} prop_buzzer_event_t;
+
+bool prop_engine_pop_buzzer_event(prop_buzzer_event_t *out_type, int *out_rssi);
+bool prop_engine_pop_warning_message(char *out, size_t out_size);

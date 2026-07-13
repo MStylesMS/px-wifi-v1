@@ -100,6 +100,9 @@ static const gpio_num_t s_battery_sense_gpio = GPIO_NUM_9;
 #define RESULT_RESET_DELAY_S 60
 #define PROP_EVENT_QUEUE_LEN 8
 #define PROP_EVENT_NAME_LEN 24
+#define PROP_BUZZER_EVENT_QUEUE_LEN 4
+#define PROP_WARNING_MESSAGE_LEN 96
+#define PROP_WARNING_MESSAGE_QUEUE_LEN 4
 
 typedef enum {
     BATTERY_STATE_NORMAL = 0,
@@ -138,8 +141,8 @@ static const battery_profile_builtin_t s_builtin_profiles[] = {
         .name = "6v-lead-acid",
         .count = 8,
         .points = {
-            {6400, 100}, {6300, 90}, {6220, 75}, {6140, 60},
-            {6060, 45}, {5980, 30}, {5900, 15}, {5750, 0},
+            {6300, 100}, {6200, 90}, {6000, 80}, {5800, 60},
+            {5600, 40}, {5400, 20}, {5200, 10}, {5000, 0},
         },
     },
     {
@@ -154,8 +157,8 @@ static const battery_profile_builtin_t s_builtin_profiles[] = {
         .name = "12v-lead-acid",
         .count = 8,
         .points = {
-            {12800, 100}, {12600, 90}, {12440, 75}, {12280, 60},
-            {12120, 45}, {11960, 30}, {11800, 15}, {11500, 0},
+            {12600, 100}, {12400, 90}, {12000, 80}, {11600, 60},
+            {11200, 40}, {10800, 20}, {10400, 10}, {10000, 0},
         },
     },
     {
@@ -211,9 +214,24 @@ typedef struct {
     int64_t battery_cutoff_since_ms;
     battery_point_t battery_points[BATTERY_MAX_POINTS];
     int battery_point_count;
+    int64_t battery_low_warning_last_ms;
     prop_event_t event_queue[PROP_EVENT_QUEUE_LEN];
     int event_head;
     int event_tail;
+
+    /* Buzzer event queue */
+    struct {
+        prop_buzzer_event_t type;
+        int rssi;
+        int64_t ts_ms;
+    } buzzer_event_queue[PROP_BUZZER_EVENT_QUEUE_LEN];
+    int buzzer_event_head;
+    int buzzer_event_tail;
+
+    /* Warning message queue for MQTT */
+    char warning_message_queue[PROP_WARNING_MESSAGE_QUEUE_LEN][PROP_WARNING_MESSAGE_LEN];
+    int warning_message_head;
+    int warning_message_tail;
 
     bool spiffs_ready;
     SemaphoreHandle_t lock;
@@ -1119,6 +1137,44 @@ static void queue_event_unlocked(const char *event_name)
     s_ctx.event_tail = next_tail;
 }
 
+static void push_buzzer_event_unlocked(prop_buzzer_event_t type, int rssi)
+{
+    int next_tail;
+
+    next_tail = (s_ctx.buzzer_event_tail + 1) % PROP_BUZZER_EVENT_QUEUE_LEN;
+    if (next_tail == s_ctx.buzzer_event_head) {
+        s_ctx.buzzer_event_head = (s_ctx.buzzer_event_head + 1) % PROP_BUZZER_EVENT_QUEUE_LEN;
+    }
+
+    s_ctx.buzzer_event_queue[s_ctx.buzzer_event_tail].type = type;
+    s_ctx.buzzer_event_queue[s_ctx.buzzer_event_tail].rssi = rssi;
+    s_ctx.buzzer_event_queue[s_ctx.buzzer_event_tail].ts_ms = now_ms();
+    s_ctx.buzzer_event_tail = next_tail;
+}
+
+static void push_warning_message_unlocked(const char *message)
+{
+    int next_tail;
+    size_t len;
+
+    if (!message || !message[0]) {
+        return;
+    }
+
+    next_tail = (s_ctx.warning_message_tail + 1) % PROP_WARNING_MESSAGE_QUEUE_LEN;
+    if (next_tail == s_ctx.warning_message_head) {
+        s_ctx.warning_message_head = (s_ctx.warning_message_head + 1) % PROP_WARNING_MESSAGE_QUEUE_LEN;
+    }
+
+    len = strlen(message);
+    if (len >= PROP_WARNING_MESSAGE_LEN) {
+        len = PROP_WARNING_MESSAGE_LEN - 1;
+    }
+    strncpy(s_ctx.warning_message_queue[s_ctx.warning_message_tail], message, len);
+    s_ctx.warning_message_queue[s_ctx.warning_message_tail][len] = '\0';
+    s_ctx.warning_message_tail = next_tail;
+}
+
 static bool is_active_state(void)
 {
     return s_ctx.state == PROP_STATE_COUNTDOWN || s_ctx.state == PROP_STATE_PAUSED;
@@ -1332,9 +1388,19 @@ static void apply_config_json_unlocked(const char *json)
     if (json_extract_int(json, "timeToleranceMs", &i_val) && i_val >= 0 && i_val <= 10000) {
         s_ctx.cfg.time_tolerance_ms = i_val;
     }
-    if (json_extract_int(json, "lowBatteryCutoffPercent", &i_val)) {
-        s_ctx.low_battery_cutoff_percent = clamp_int(i_val, 0, 100);
+
+    /* Parse lowBatteryPercent first, before validating lowBatteryCutoffPercent */
+    if (json_extract_int(json, "lowBatteryPercent", &i_val)) {
+        s_ctx.low_battery_percent = clamp_int(i_val, 0, 100);
     }
+
+    if (json_extract_int(json, "lowBatteryCutoffPercent", &i_val)) {
+        /* Must be >= 20 and < low_battery_percent */
+        int min_cutoff = 20;
+        int max_cutoff = s_ctx.low_battery_percent > min_cutoff ? s_ctx.low_battery_percent - 1 : min_cutoff;
+        s_ctx.low_battery_cutoff_percent = clamp_int(i_val, min_cutoff, max_cutoff);
+    }
+
     if (json_extract_int(json, "keepSyncMaxDriftMs", &i_val) && i_val >= 0 && i_val <= 10000) {
         s_ctx.cfg.keep_sync_max_drift_ms = i_val;
     }
@@ -1453,17 +1519,13 @@ static void apply_config_json_unlocked(const char *json)
         }
     }
 
-    if (json_extract_int(json, "lowBatteryPercent", &i_val)) {
-        s_ctx.low_battery_percent = clamp_int(i_val, 0, 100);
-    }
-
     if (json_extract_int(json, "batteryVoltageMv", &i_val)) {
         s_ctx.battery_voltage_mv = clamp_int(i_val, 0, BATTERY_ADC_FULL_SCALE_MV);
         s_ctx.battery_adc_raw = battery_adc_raw_from_voltage_mv(s_ctx.battery_voltage_mv);
     }
 
     if (json_extract_int(json, "batteryAdcAt0V", &i_val)) {
-        s_ctx.battery_adc_at_0v = clamp_int(i_val, 0, BATTERY_ADC_MAX_VALUE);
+        s_ctx.battery_adc_at_0v = clamp_int(i_val, -500, 5000);
     }
 
     if (json_extract_int(json, "batteryAdcAt15V", &i_val)) {
@@ -1610,7 +1672,7 @@ static void load_battery_file_if_present(void)
         }
 
         if (json_extract_int(buf, "adcAt0V", &i_val)) {
-            s_ctx.battery_adc_at_0v = clamp_int(i_val, 0, BATTERY_ADC_MAX_VALUE);
+            s_ctx.battery_adc_at_0v = clamp_int(i_val, -500, 5000);
         }
 
         if (json_extract_int(buf, "adcAt15V", &i_val)) {
@@ -1841,6 +1903,22 @@ static void timer_task(void *arg)
                     s_ctx.battery_zero_since_ms = 0;
                 }
 
+                /* Low battery warning: edge-triggered on first crossing below low_battery_percent,
+                 * then repeats every 5 minutes while still low. */
+                if (s_ctx.battery_low &&
+                    (s_ctx.battery_low_warning_last_ms == 0 ||
+                     (now - s_ctx.battery_low_warning_last_ms) >= 300000)) {
+                    char warning_msg[96];
+                    snprintf(warning_msg, sizeof(warning_msg),
+                             "Low battery: %d%% (threshold %d%%)",
+                             s_ctx.battery_percent, s_ctx.low_battery_percent);
+                    push_buzzer_event_unlocked(PROP_BUZZER_EVENT_LOW_BATTERY, 0);
+                    push_warning_message_unlocked(warning_msg);
+                    s_ctx.battery_low_warning_last_ms = now;
+                } else if (!s_ctx.battery_low) {
+                    s_ctx.battery_low_warning_last_ms = 0;
+                }
+
                 if (s_ctx.low_battery_cutoff_percent > 0 &&
                     s_ctx.battery_percent <= s_ctx.low_battery_cutoff_percent) {
                     if (s_ctx.battery_cutoff_since_ms == 0) {
@@ -1870,6 +1948,17 @@ static void timer_task(void *arg)
                          s_ctx.battery_shutdown_delay_s);
             }
 
+            /* Queue shutdown beep event before powering down; let buzzer_task emit it */
+            if (!prop_lock()) {
+                goto shutdown_no_beep;
+            }
+            push_buzzer_event_unlocked(PROP_BUZZER_EVENT_SHUTDOWN, 0);
+            prop_unlock();
+
+            /* Give buzzer_task time to play the shutdown sound (~1.2 seconds for the shutdown MML) */
+            vTaskDelay(pdMS_TO_TICKS(1400));
+
+        shutdown_no_beep:
             /* Power down LEDs/display/buzzer before sleep so they do not keep
              * drawing current while the MCU is in deep sleep. */
             if (s_deep_sleep_prepare_fn) {
@@ -2248,6 +2337,70 @@ bool prop_engine_pop_event_json(char *out, size_t out_size)
              event.max_tries,
              event.mode);
     return true;
+}
+
+bool prop_engine_pop_buzzer_event(prop_buzzer_event_t *out_type, int *out_rssi)
+{
+    if (!out_type || !out_rssi) {
+        return false;
+    }
+
+    if (!prop_lock()) {
+        return false;
+    }
+
+    if (s_ctx.buzzer_event_head == s_ctx.buzzer_event_tail) {
+        prop_unlock();
+        return false;
+    }
+
+    *out_type = s_ctx.buzzer_event_queue[s_ctx.buzzer_event_head].type;
+    *out_rssi = s_ctx.buzzer_event_queue[s_ctx.buzzer_event_head].rssi;
+    s_ctx.buzzer_event_head = (s_ctx.buzzer_event_head + 1) % PROP_BUZZER_EVENT_QUEUE_LEN;
+    prop_unlock();
+    return true;
+}
+
+bool prop_engine_pop_warning_message(char *out, size_t out_size)
+{
+    if (!out || out_size < 2) {
+        return false;
+    }
+
+    if (!prop_lock()) {
+        out[0] = '\0';
+        return false;
+    }
+
+    if (s_ctx.warning_message_head == s_ctx.warning_message_tail) {
+        prop_unlock();
+        out[0] = '\0';
+        return false;
+    }
+
+    strncpy(out, s_ctx.warning_message_queue[s_ctx.warning_message_head], out_size - 1);
+    out[out_size - 1] = '\0';
+    s_ctx.warning_message_head = (s_ctx.warning_message_head + 1) % PROP_WARNING_MESSAGE_QUEUE_LEN;
+    prop_unlock();
+    return true;
+}
+
+void prop_engine_notify_wifi_connected(int rssi)
+{
+    if (!prop_lock()) {
+        return;
+    }
+    push_buzzer_event_unlocked(PROP_BUZZER_EVENT_WIFI_CONNECTED, rssi);
+    prop_unlock();
+}
+
+void prop_engine_notify_wifi_disconnected(void)
+{
+    if (!prop_lock()) {
+        return;
+    }
+    push_buzzer_event_unlocked(PROP_BUZZER_EVENT_WIFI_LOST, 0);
+    prop_unlock();
 }
 
 static esp_err_t handle_command_unlocked(const char *cmd, const char *json, char *response, size_t response_size)

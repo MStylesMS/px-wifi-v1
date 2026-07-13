@@ -57,6 +57,16 @@ static const char *TAG = "px-wifi-v1";
 #define SEG_G 0x40
 #define SEG_DP 0x80
 
+/* Hardcoded buzzer sound effect MML patterns (not user-configurable) */
+#define BUZZER_MML_PAUSE            "T120 O5 L2 V80 C"
+#define BUZZER_MML_RESUME           "T120 O6 L2 V80 C"
+#define BUZZER_MML_WIFI_LOST        "T140 O5 L2 V75 D"
+#define BUZZER_MML_LOW_BATTERY       "T160 O4 L16 V80 C R C R C"
+#define BUZZER_MML_SHUTDOWN         "T100 O4 L1 V80 C"
+/* WiFi connected intro (medium-high, long), followed by N short beeps for signal bars */
+#define BUZZER_MML_WIFI_CONNECTED   "T140 O6 L2 V75 G"
+#define BUZZER_MML_WIFI_BEEP_SHORT  " R L32 O7 V80 C"
+
 static bool s_display_ready;
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_display_dev;
@@ -65,6 +75,16 @@ static uint8_t s_display_addr = DISP_HT16K33_ADDR_DEFAULT;
 static uint8_t lerp_u8(uint8_t a, uint8_t b, int num, int den)
 {
     return (uint8_t)(a + ((b - a) * num) / den);
+}
+
+/* Convert WiFi RSSI signal strength to bar count (1-4 bars).
+ * Thresholds mirror app.js wifiLevel() function. */
+static int wifi_rssi_to_bars(int rssi)
+{
+    if (rssi >= -55) return 4;
+    if (rssi >= -67) return 3;
+    if (rssi >= -75) return 2;
+    return 1;
 }
 
 static const char *wakeup_cause_name(esp_sleep_wakeup_cause_t cause)
@@ -946,6 +966,7 @@ static void buzzer_task(void *arg)
 
     prop_led_hint_t prev_hint = PROP_LED_HINT_OFF;
     prop_buzzer_mml_config_t buzzer_cfg;
+    prop_runtime_snapshot_t runtime_snap;
 
     while (true) {
         if (s_outputs_powered_down) {
@@ -963,13 +984,19 @@ static void buzzer_task(void *arg)
             prop_engine_get_buzzer_mml_config(&buzzer_cfg);
 
             if (hint == PROP_LED_HINT_COUNTDOWN) {
-                /* Start or resume → up beep */
-                buzzer_play_mml(buzzer_cfg.start_resume);
-            } else if (hint == PROP_LED_HINT_PAUSED ||
-                       (hint == PROP_LED_HINT_READY && hint_is_running(prev_hint)) ||
-                       (hint == PROP_LED_HINT_NOT_READY && hint_is_running(prev_hint))) {
-                /* Pause or reset during game → down beep */
-                buzzer_play_mml(buzzer_cfg.pause_reset);
+                /* Start or resume → distinguish Resume (from pause) from Start */
+                if (prev_hint == PROP_LED_HINT_PAUSED) {
+                    buzzer_play_mml(BUZZER_MML_RESUME);
+                } else {
+                    buzzer_play_mml(buzzer_cfg.start_resume);  /* Start: high double beep */
+                }
+            } else if (hint == PROP_LED_HINT_PAUSED) {
+                /* Pause: new distinct low long beep */
+                buzzer_play_mml(BUZZER_MML_PAUSE);
+            } else if ((hint == PROP_LED_HINT_READY || hint == PROP_LED_HINT_NOT_READY) &&
+                       hint_is_running(prev_hint)) {
+                /* Reset: transition back to READY/NOT_READY during countdown */
+                buzzer_play_mml(buzzer_cfg.pause_reset);  /* Low double beep */
             } else if (hint == PROP_LED_HINT_DEFUSED) {
                 buzzer_play_mml(buzzer_cfg.solved);
             } else if (hint == PROP_LED_HINT_DETONATED) {
@@ -985,6 +1012,33 @@ static void buzzer_task(void *arg)
             prev_hint = hint;
         }
 
+        /* --- poll buzzer event queue (WiFi/battery/shutdown) --- */
+        if (!s_player.active) {
+            prop_buzzer_event_t event_type;
+            int rssi;
+
+            while (prop_engine_pop_buzzer_event(&event_type, &rssi)) {
+                if (event_type == PROP_BUZZER_EVENT_WIFI_CONNECTED) {
+                    /* Build WiFi connected tone: intro + N beeps matching signal bars */
+                    char wifi_mml[256];
+                    int bars = wifi_rssi_to_bars(rssi);
+                    int i;
+                    snprintf(wifi_mml, sizeof(wifi_mml), "%s", BUZZER_MML_WIFI_CONNECTED);
+                    for (i = 0; i < bars; ++i) {
+                        strncat(wifi_mml, BUZZER_MML_WIFI_BEEP_SHORT, sizeof(wifi_mml) - strlen(wifi_mml) - 1);
+                    }
+                    buzzer_play_mml(wifi_mml);
+                } else if (event_type == PROP_BUZZER_EVENT_WIFI_LOST) {
+                    buzzer_play_mml(BUZZER_MML_WIFI_LOST);
+                } else if (event_type == PROP_BUZZER_EVENT_LOW_BATTERY) {
+                    buzzer_play_mml(BUZZER_MML_LOW_BATTERY);
+                } else if (event_type == PROP_BUZZER_EVENT_SHUTDOWN) {
+                    buzzer_play_mml(BUZZER_MML_SHUTDOWN);
+                }
+                break;  /* Only process one event per tick to allow sequencer to run */
+            }
+        }
+
         /* --- run sequencer --- */
         if (buzzer_tick()) {
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -995,6 +1049,13 @@ static void buzzer_task(void *arg)
         if (hint == PROP_LED_HINT_PENALTY) {
             bool on = ((t_ms % 400) < 80);
             buzzer_set(on, 1200, duty_from_volume(65));
+        } else if (hint == PROP_LED_HINT_COUNTDOWN) {
+            /* Last 60 seconds: emit a short 1Hz beep ticker */
+            prop_engine_get_runtime_snapshot(&runtime_snap);
+            if (runtime_snap.time_remaining_ms > 0 && runtime_snap.time_remaining_ms <= 60000) {
+                bool on = ((t_ms % 1000) < 100);
+                buzzer_set(on, 2600, duty_from_volume(70));
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(20));

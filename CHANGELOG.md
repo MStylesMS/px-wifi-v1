@@ -7,6 +7,55 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ## [Unreleased]
 
+### Added
+
+- `main.c`/`prop_engine.h`: countdown timer now emits a short 1 Hz beep during
+  the last 60 seconds before detonation, providing real-time countdown feedback.
+- `main.c`/`prop_engine.h`/`web_ui.c`: new buzzer sound effects for distinct game states:
+  - **Pause** (low-pitched long beep): distinct from the existing Start/Reset sounds
+  - **Resume** (high-pitched long beep): distinct from the existing Start/Reset sounds
+  - **WiFi connected** (medium-high long beep + signal-strength short beeps): plays 1-4 beeps
+    matching current RSSI bars, mirroring the web UI signal indicator
+  - **WiFi lost** (medium-low long beep)
+  - **Low battery** (very low triple beep): repeats every 5 minutes while battery remains below
+    the "Low Battery %" threshold, and also sends an MQTT warning message to the game UI
+    system warnings box each time
+  - **Shutdown** (very low long beep): plays during the 1.4-second countdown before
+    deep-sleep entry, ensuring the prop "says goodbye" before powering down
+- `main/webui/config.html`/`main/webui/app.js`/`prop_engine.c`: new **"Battery Cutoff %"** UI setting
+  (item 20 on the Config page) exposed immediately after "Low Battery %". Allows the user
+  to tune the battery threshold that triggers deep-sleep entry. Validation enforces
+  20% ≤ Battery Cutoff % < Low Battery %.
+- `prop_engine.c`/`prop_engine.h`: internal event queues for buzzer events and warning
+  messages, decoupling battery/WiFi event detection (prop_engine) from sound playback
+  (main.c buzzer_task) and MQTT publishing (web_ui.c mqtt_state_task).
+
+### Changed
+
+- `main.c` `buzzer_task()`: Start/Resume transition now distinguished: Start (entering
+  countdown from READY/NOT_READY) keeps the high double beep; Resume (entering countdown
+  from PAUSED) plays a new high long beep. Similarly, Pause (entering PAUSED state) now
+  plays a new low long beep, while Reset (leaving COUNTDOWN back to READY/NOT_READY) keeps
+  the low double beep.
+- `web_ui.c` `mqtt_state_task()`: now drains the warning-message queue every 500ms cycle,
+  allowing battery/event warning messages to be published to the MQTT warnings topic
+  (and displayed in the game UI system warnings box) in real time.
+- `main/webui/config.html`: renamed field 19 label from "Low Battery %" to "Low Battery Notification %"
+  for clarity; the "Battery Cutoff %" field (item 20) now displays with a hint comment
+  "(Must be >= 20% and < Low Battery Notification %)" to guide users on validation constraints.
+- Removed stale, unused top-level `webui/` folder that duplicated `main/webui/` (the only
+  copy actually embedded into the firmware via `main/CMakeLists.txt` `EMBED_TXTFILES`). The
+  duplicate had drifted out of sync and was a source of confusion when editing the web UI.
+
+### Security / Fixed
+
+- `prop_engine.c` `apply_config_json_unlocked()`: `lowBatteryPercent` parsing now occurs
+  before `lowBatteryCutoffPercent` to ensure correct validation order; the cutoff threshold
+  is now clamped to `[20, low_battery_percent - 1]` so a single payload updating both fields
+  validates correctly against the new `lowBatteryPercent` value.
+
+## [0.32] - 2024-XX-XX
+
 ### Security / Fixed
 
 - `prop_engine.c`/`.h`: added `prop_engine_get_battery_snapshot()`, a

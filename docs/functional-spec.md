@@ -274,12 +274,17 @@ Example: with 4 wires and custom order red/yellow/green/blue, solution vector is
 |-------|---------------|
 | Countdown, lid closed, >5 min left | 1 second beep once per minute |
 | Countdown, lid open OR <=5 min left | 0.1 second beep once per second |
+| Last 60 seconds | 0.1 second beep at 1 Hz (short beep every second) |
 | Last 10 seconds | 0.1 second beep every 250ms |
 | Correct wire disconnected | Rising tone (pitch increases with each correct wire) |
 | Wrong wire disconnected | Harsh buzz / error tone |
 | Defused (success) | Configurable: `none`, `beeps` (3 quick high beeps), or `melody` |
 | Detonated (failure) | Configurable: `none`, `buzz` (5s at 1kHz), or `melody` |
 | Detonated active sound | Solid tone/buzz for 5 seconds on detonation |
+| WiFi connected | Medium-high long beep followed by 1–4 short beeps (matching current WiFi signal bars) |
+| WiFi lost | Medium-low long beep |
+| Low battery alert | Very low-pitched triple beep; repeats once every 5 minutes while battery is below `lowBatteryPercent` |
+| Shutdown (before deep sleep) | Very low-pitched long beep; plays during ~1.4-second countdown before entering sleep mode |
 | MQTT command received | Optional brief acknowledgment beep |
 
 Melody strings use **MML-style** (Music Macro Language) notation: note + octave + duration, comma-separated.   
@@ -601,7 +606,8 @@ In the Live panel, **Tries Used** is shown only when mode is `buzz` or `penalty`
 | Debounce consecutive reads | 5 | Config file only |
 | Heartbeat interval | 10 seconds | Web UI |
 | Heartbeat topic | `paradox/state` | Web UI |
-| Low-battery threshold | 40% capacity | Web UI |
+| Low Battery Notification % | 40% | Web UI |
+| Battery Cutoff % | 20% | Web UI |
 | LED brightness | 20% | Config file only |
 | WiFi AP timeout | 30 seconds | Config file only |
 | Success sound | `beeps` | Web UI |
@@ -621,7 +627,22 @@ In the Live panel, **Tries Used** is shown only when mode is `buzz` or `penalty`
 | Battery profile default | `unknown` | Web UI |
 | mDNS network name | Derived from prop id + unique suffix | Web UI |
 
-### 10.1 Battery Profiles
+## 10. Configuration & Tuning
+
+### 10.1 Battery Monitoring Settings
+
+| Setting | Default | Web UI | Description |
+|---------|---------|--------|-------------|
+| Low Battery Notification % | 40% | Yes | Battery capacity threshold (0–100%) that triggers low-battery alerts. When battery drops below this level, a triple-beep alert plays every 5 minutes and an MQTT warning is published to the warnings topic. |
+| Battery Cutoff % | 20% | Yes | Battery capacity threshold (0–100%) that triggers deep-sleep shutdown. If battery stays at or below this level for 15+ seconds, the device enters low-power sleep mode. Valid range: 20% to <Low Battery Notification %. |
+
+**Behavior:**
+
+- **Low Battery Notification:** Device remains online and operational but emits repeated alerts (very low-pitched triple beep, repeating every 5 minutes).
+- **Battery Cutoff:** Device powers down non-essential subsystems (WiFi, display, buzzer) and enters deep-sleep mode to preserve battery. GPIO inputs remain active to detect wake events. Plays a shutdown beep (~1.4 seconds) before entering sleep.
+- **Deep Sleep Wake:** On wake (via Reset button or power reconnection), device reconnects to WiFi and MQTT, publishes a `reconnected` event, and resumes normal operation.
+
+### 10.2 Battery Profiles
 
 Battery profiles are defined in the persistent configuration file as voltage-to-capacity lookup arrays.
 
@@ -634,7 +655,7 @@ Required initial profiles:
 - `external`
 - `unknown`
 
-Each profile maps measured battery voltage to approximate remaining capacity (%). Low-battery warnings trigger when computed capacity falls below `lowBatteryPercent` (default 40).
+Each profile maps measured battery voltage to approximate remaining capacity (%). Low-battery notifications trigger when computed capacity falls below `lowBatteryPercent` (default 40); deep-sleep shutdown triggers when capacity falls below `lowBatteryCutoffPercent` (default 20).
 
 Battery profile storage also includes voltage-divider calibration and raw ADC correlation:
 

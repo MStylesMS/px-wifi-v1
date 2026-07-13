@@ -1101,6 +1101,7 @@ static void mqtt_state_task(void *arg)
 {
     int64_t last_state_pub_ms = 0;
     bool was_connected = false;
+    char warning_msg[96];
 
     (void)arg;
 
@@ -1109,6 +1110,11 @@ static void mqtt_state_task(void *arg)
         int64_t now = esp_timer_get_time() / 1000;
 
         (void)mqtt_publish_engine_events(true);
+
+        /* Drain and publish warning messages (e.g., low battery warnings) */
+        while (prop_engine_pop_warning_message(warning_msg, sizeof(warning_msg))) {
+            mqtt_publish_warning(warning_msg);
+        }
 
         if (!svc_mqtt_is_connected()) {
             was_connected = false;
@@ -1785,8 +1791,17 @@ static esp_err_t ws_handler(httpd_req_t *req)
 
 static void wifi_on_sta_connected(const char *ip_text, void *ctx)
 {
+    svc_wifi_status_t wifi_status;
+
     (void)ctx;
     (void)ip_text;
+
+    /* Notify prop_engine of WiFi connection with current RSSI for buzzer signal-strength beeps */
+    svc_wifi_get_status(&wifi_status);
+    if (wifi_status.connected) {
+        prop_engine_notify_wifi_connected(wifi_status.rssi);
+    }
+
     mqtt_start_client();
 }
 
@@ -1795,6 +1810,10 @@ static void wifi_on_sta_disconnected(int reason, const char *reason_text, void *
     (void)ctx;
     (void)reason;
     (void)reason_text;
+
+    /* Notify prop_engine of WiFi disconnection for buzzer */
+    prop_engine_notify_wifi_disconnected();
+
     mqtt_stop_client();
 }
 

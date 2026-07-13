@@ -153,28 +153,35 @@ Navigate to the **Configuration Page** at `http://<device-ip>/config.html`:
 - **Penalty Amount** — Seconds deducted for wrong wire (default: 30)
 - **Max Tries** — Number of wrong wires before forced failure (default: 3)
 
+#### Power Section
+- **Low Battery Notification %** — Battery capacity threshold (%) that triggers warning alerts (default: 40). When battery drops below this level, the device emits a triple-beep alert every 5 minutes and sends MQTT warning messages.
+- **Battery Cutoff %** — Battery capacity threshold (%) that triggers deep-sleep shutdown (default: 20). If battery remains at or below this level for 15+ seconds continuously, the device powers down to sleep mode. Valid range: 20% to <Low Battery Notification %.
+
 #### Save
 Click **Save** to store these settings persistently. Settings survive power loss.
 
-### Advanced Manual Config (Not in Web UI)
+### Battery Management
 
-Some advanced options are only available by editing SPIFFS config directly.
+#### Low Battery Notifications
 
-Config file path: `/spiffs/config.json`
+When battery capacity drops below the "Low Battery Notification %" threshold:
 
-- `lowBatteryCutoffPercent` (default: `20`)
-- Range: `0` to `100`
-- Behavior: if battery percentage stays at or below this value for 15 seconds continuously, the device enters deep sleep
-- Set to `0` to disable this feature
-- Wake behavior after low-battery deep sleep: the next state change on the red wire input (GPIO4) wakes the unit. Reset button and power-cycle also wake/restart the unit.
+1. The device emits a **very low-pitched triple-beep alert** (pattern: beep–pause–beep–pause–beep)
+2. An MQTT warning message is published to `paradox/{site}/{zone}/warnings` for the game UI to display
+3. These alerts repeat **once every 5 minutes** while battery remains below the threshold
+4. The RGB LED may flash amber/red to indicate low-battery status
 
-Example:
+#### Deep Sleep on Critical Battery
 
-```json
-{
-  "lowBatteryCutoffPercent": 20
-}
-```
+If battery drops to or below the "Battery Cutoff %" threshold and stays there for 15+ seconds continuously, the device enters deep-sleep mode to preserve remaining battery and prevent data loss:
+
+1. The device powers down non-essential subsystems (WiFi, display, buzzer)
+2. The 7-segment display blanks
+3. GPIO inputs remain active to detect player actions
+4. To wake the device, **press the Reset button** or **disconnect and reconnect power**
+5. The device will attempt to reconnect to WiFi and MQTT automatically on wake
+
+**Note:** Battery Cutoff % is normally configured via the web UI (item 20 on Configuration page). For emergency adjustments, the setting can also be edited in `/spiffs/config.json` as `lowBatteryCutoffPercent` (range: 0–100).
 
 ---
 

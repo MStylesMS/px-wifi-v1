@@ -79,11 +79,14 @@
                         <option value="unknown">Unknown</option>
                     </select>
                 </label>
-                <label>19. Low Battery %<input name="lowBatteryPercent" type="number" min="0" max="100"></label>
-                <label>20. Buzzer Start/Resume MML<textarea name="buzzerStartResumeMml" rows="2"></textarea></label>
-                <label>21. Buzzer Pause/Reset MML<textarea name="buzzerPauseResetMml" rows="2"></textarea></label>
-                <label>22. Buzzer Solved MML<textarea name="buzzerSolvedMml" rows="3"></textarea></label>
-                <label>23. Buzzer Failed MML<textarea name="buzzerFailedMml" rows="3"></textarea></label>
+                <label>19. Low Battery Notification %<input name="lowBatteryPercent" type="number" min="0" max="100"></label>
+                <label>20. Battery Cutoff %
+                    <span class="hint" style="display:block;font-size:0.9em;margin-top:0.3rem;">Must be >= 20% and < Low Battery Notification %</span>
+                    <input name="lowBatteryCutoffPercent" type="number" min="20" max="99" style="margin-top:0.3rem;"></label>
+                <label>21. Buzzer Start/Resume MML<textarea name="buzzerStartResumeMml" rows="2"></textarea></label>
+                <label>22. Buzzer Pause/Reset MML<textarea name="buzzerPauseResetMml" rows="2"></textarea></label>
+                <label>23. Buzzer Solved MML<textarea name="buzzerSolvedMml" rows="3"></textarea></label>
+                <label>24. Buzzer Failed MML<textarea name="buzzerFailedMml" rows="3"></textarea></label>
             </form>
             <pre id="configLog" class="log"></pre>
         </section>
