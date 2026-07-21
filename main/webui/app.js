@@ -131,6 +131,7 @@
                     batteryPercent: 100,
                     batteryState: "normal",
                     batteryVoltageMv: 5200,
+                    batteryAdcRaw: 1420,
                     lowBattery: false,
                     networkName: "px-wifi-v1-a1b2",
                     apSsid: "Paradox-PXWiFiV1-A1B2",
@@ -815,11 +816,15 @@
                         batteryVoltageMv: details.batteryVoltageMv,
                         lowBattery: details.lowBattery
                     });
-                    batNode.textContent = meta.batteryState === "usb"
-                        ? meta.label
-                        : `${meta.label} (${(meta.voltageMv / 1000).toFixed(2)}V)`;
+                    /* Always show converted voltage — needed for ADC calibration
+                     * even when USB power makes batteryState === "usb". */
+                    batNode.textContent = `${meta.label} (${(meta.voltageMv / 1000).toFixed(2)}V)`;
                     batNode.classList.remove("text-ok", "text-warn", "text-good", "text-bad", "text-muted");
                     batNode.classList.add(meta.colorClass);
+                }
+                const adcNode = el("detailBatteryAdc");
+                if (adcNode) {
+                    adcNode.textContent = details.batteryAdcRaw == null ? "-" : String(details.batteryAdcRaw);
                 }
             }
             renderApIpNote(details.apIpAddress);

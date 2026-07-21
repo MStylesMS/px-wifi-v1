@@ -271,6 +271,7 @@ char *web_ui_json_build_device_details_payload(const char *prop_name,
                                                int battery_percent,
                                                const char *battery_state,
                                                int battery_voltage_mv,
+                                               int battery_adc_raw,
                                                bool battery_low,
                                                bool has_cpu_temp,
                                                float cpu_temp_c,
@@ -309,6 +310,7 @@ char *web_ui_json_build_device_details_payload(const char *prop_name,
     cJSON_AddNumberToObject(root, "batteryPercent", battery_percent);
     json_add_string(root, "batteryState", battery_state && battery_state[0] ? battery_state : "normal");
     cJSON_AddNumberToObject(root, "batteryVoltageMv", battery_voltage_mv);
+    cJSON_AddNumberToObject(root, "batteryAdcRaw", battery_adc_raw);
     cJSON_AddBoolToObject(root, "lowBattery", battery_low);
     json_add_string(root, "networkName", network_name);
     json_add_string(root, "status", status);

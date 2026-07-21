@@ -1693,6 +1693,7 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     char battery_state[16] = "normal";
     int battery = -1;
     int battery_voltage_mv = 0;
+    int battery_adc_raw = 0;
     bool battery_low = false;
     float cpu_temp_c = 0.0f;
     bool has_cpu_temp = false;
@@ -1700,6 +1701,7 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     const esp_app_desc_t *app = esp_app_get_description();
     char ap_ip_text[32] = "192.168.4.1";
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    prop_battery_snapshot_t battery_snap;
 
     if (check_ui_auth(req) != ESP_OK) {
         return ESP_FAIL;
@@ -1718,6 +1720,8 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     (void)json_extract_string_local(state_json, "batteryState", battery_state, sizeof(battery_state));
     (void)json_extract_int_local(state_json, "batteryVoltageMv", &battery_voltage_mv);
     (void)json_extract_bool_local(state_json, "lowBattery", &battery_low);
+    prop_engine_get_battery_snapshot(&battery_snap);
+    battery_adc_raw = battery_snap.battery_adc_raw;
     has_cpu_temp = cpu_temp_read(&cpu_temp_c);
 
     char *payload;
@@ -1737,6 +1741,7 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
                                                        battery,
                                                        battery_state,
                                                        battery_voltage_mv,
+                                                       battery_adc_raw,
                                                        battery_low,
                                                        has_cpu_temp,
                                                        cpu_temp_c,

@@ -7,6 +7,20 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ## [Unreleased]
 
+## [0.36] - 2026-07-21
+
+### Added
+
+- Connect page Device Details: **Battery ADC** field shows the raw ADC reading
+  used for voltage conversion (for calibration while tuning a board).
+- `GET /api/device/details`: includes `batteryAdcRaw`.
+
+### Changed
+
+- Connect page Device Details: Battery always shows converted voltage, including
+  when `batteryState` is `usb` (USB cable attached), so meter vs ADC voltage
+  can be compared during calibration.
+
 ## [0.35] - 2026-07-20
 
 ### Added

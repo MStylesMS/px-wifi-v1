@@ -284,6 +284,10 @@ Example response:
   "cpuTempC": 48.2,
   "freeMemoryBytes": 243712,
   "batteryPercent": 87,
+  "batteryState": "normal",
+  "batteryVoltageMv": 7850,
+  "batteryAdcRaw": 1680,
+  "lowBattery": false,
   "networkName": "px-wifi-v1-a1b2",
   "status": "ready",
   "apIpAddress": "192.168.4.1",
@@ -297,6 +301,10 @@ Example response:
   "pendingApShutdown": false
 }
 ```
+
+`batteryVoltageMv` is the converted sense-pin voltage and is present even when
+`batteryState` is `"usb"`. `batteryAdcRaw` is the oversampled raw ADC count used
+for that conversion.
 
 #### `POST /api/device/name`
 
