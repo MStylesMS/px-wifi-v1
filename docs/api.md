@@ -281,7 +281,7 @@ Example response:
   "softwareVersion": "0.1.0",
   "buildNumber": "0.1.0",
   "buildDate": "May 20 2026 10:00:00",
-  "cpuTempC": null,
+  "cpuTempC": 48.2,
   "freeMemoryBytes": 243712,
   "batteryPercent": 87,
   "networkName": "px-wifi-v1-a1b2",
@@ -793,13 +793,14 @@ All fields can be set via `POST /api/config/save` or `POST /api/connection`. The
 | `wifiPassword` | string | `""` | Max 64 chars |
 | `networkName` | string | `"px-wifi-v1-XXYY"` | mDNS hostname; max 32 chars, alphanumeric + `-` |
 | `apPassword` | string | `""` | AP password (WPA2 if set); max 64 chars |
+| `uiPassword` | string | `""` | Optional web UI login password (HTTP Basic Auth). Empty = no login required. |
 | `apEnabled` | boolean | `true` | Keep AP running after STA connects |
 | `mqttHost` | string | `""` | Max 127 chars |
 | `mqttPort` | integer | `1883` | |
 | `mqttUsername` | string | `""` | Max 63 chars |
 | `mqttPassword` | string | `""` | Max 63 chars |
 | `mqttBaseTopic` | string | `"site/room/zone"` | Max 95 chars |
-| `mqttGameStateTopic` | string | `"site/room/state"` | Max 127 chars; keep-sync source |
+| `mqttGameStateTopic` | string | `"site/room/state"` | Max 127 chars; keep-sync source. Used as-is — include `/state` in the value; nothing is appended. |
 | `mqttPropAnnounceTopic` | string | `"site/props"` | Max 127 chars; announce destination |
 | `heartbeatInterval` | integer (ms) | `10000` | MQTT state publish interval (1000–120000 ms) |
 

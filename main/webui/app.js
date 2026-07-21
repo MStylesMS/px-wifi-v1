@@ -126,7 +126,7 @@
                     softwareVersion: "demo",
                     buildNumber: "demo-local",
                     buildDate: "2026-04-09 10:00:00",
-                    cpuTempC: null,
+                    cpuTempC: 42.5,
                     freeMemoryBytes: 243712,
                     batteryPercent: 100,
                     batteryState: "normal",
@@ -776,8 +776,11 @@
             el("mqttGameStateTopic").value = cfg.mqttGameStateTopic || "";
             el("mqttPropAnnounceTopic").value = cfg.mqttPropAnnounceTopic || cfg.mqttPropStateTopic || "";
             el("networkName").value = cfg.networkName || "";
+            if (el("uiPassword")) {
+                el("uiPassword").value = cfg.uiPassword || "";
+            }
             if (el("apSsidDisplay")) {
-                el("apSsidDisplay").textContent = cfg.apSsid || "Paradox-PXWiFiV1";
+                el("apSsidDisplay").value = cfg.apSsid || "Paradox-PXWiFiV1";
             }
             if (el("apPassword")) {
                 el("apPassword").value = cfg.apPassword || "";
@@ -801,9 +804,24 @@
             setText("detailSoftwareVersion", details.softwareVersion || "-");
             setText("detailBuildNumber", details.buildNumber || "-");
             setText("detailBuildDate", details.buildDate || "-");
-            setText("detailCpuTemp", details.cpuTempC == null ? "n/a" : `${details.cpuTempC.toFixed(1)} C`);
+            setText("detailCpuTemp", details.cpuTempC == null ? "n/a" : `${Number(details.cpuTempC).toFixed(1)} C`);
             setText("detailFreeMemory", details.freeMemoryBytes == null ? "-" : `${Math.round(details.freeMemoryBytes / 1024)} KB`);
-            setText("detailBattery", details.batteryPercent == null ? "-" : `${details.batteryPercent}%`);
+            {
+                const batNode = el("detailBattery");
+                if (batNode) {
+                    const meta = batteryMeta({
+                        battery: details.batteryPercent,
+                        batteryState: details.batteryState,
+                        batteryVoltageMv: details.batteryVoltageMv,
+                        lowBattery: details.lowBattery
+                    });
+                    batNode.textContent = meta.batteryState === "usb"
+                        ? meta.label
+                        : `${meta.label} (${(meta.voltageMv / 1000).toFixed(2)}V)`;
+                    batNode.classList.remove("text-ok", "text-warn", "text-good", "text-bad", "text-muted");
+                    batNode.classList.add(meta.colorClass);
+                }
+            }
             renderApIpNote(details.apIpAddress);
 
             if (details.networkName && el("networkName") && document.activeElement !== el("networkName")) {
@@ -910,6 +928,19 @@
         }
 
         el("refreshDetails").addEventListener("click", loadDeviceDetails);
+        el("rebootDevice").addEventListener("click", async () => {
+            try {
+                appendLog(deviceLog, { reboot: "requested" });
+                const result = await api("/api/command", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ command: "reboot" })
+                });
+                appendLog(deviceLog, { reboot: result });
+            } catch (err) {
+                appendLog(deviceLog, { error: String(err) });
+            }
+        });
         el("connectWifi").addEventListener("click", async () => {
             const statusEl = el("wifiStatus");
             try {
@@ -941,6 +972,7 @@
             try {
                 const payload = {
                     networkName: el("networkName").value,
+                    uiPassword: el("uiPassword") ? el("uiPassword").value : "",
                     apPassword: el("apPassword") ? el("apPassword").value : "",
                     apEnabled: el("apEnabled") ? el("apEnabled").checked : true
                 };

@@ -112,6 +112,7 @@ esp_err_t web_ui_json_load_connection_cfg(const char *path, connection_cfg_t *cf
     }
     (void)web_ui_json_get_string(root, "networkName", cfg->network_name, sizeof(cfg->network_name));
     (void)web_ui_json_get_string(root, "apPassword", cfg->ap_password, sizeof(cfg->ap_password));
+    (void)web_ui_json_get_string(root, "uiPassword", cfg->ui_password, sizeof(cfg->ui_password));
     if (web_ui_json_get_bool(root, "apEnabled", &b_val)) {
         cfg->ap_enabled = b_val;
     }
@@ -154,6 +155,7 @@ esp_err_t web_ui_json_save_connection_cfg(const char *path,
     json_add_string(root, "mqttPropAnnounceTopic", cfg->mqtt_prop_announce_topic);
     json_add_string(root, "networkName", cfg->network_name);
     json_add_string(root, "apPassword", cfg->ap_password);
+    json_add_string(root, "uiPassword", cfg->ui_password);
     cJSON_AddBoolToObject(root, "apEnabled", cfg->ap_enabled);
     svc_nvs_config_merge(root, prop_root);
 
@@ -204,6 +206,7 @@ char *web_ui_json_build_unified_config_payload(const connection_cfg_t *cfg,
     json_add_string(root, "mqttPropStateTopic", cfg->mqtt_prop_announce_topic);
     json_add_string(root, "networkName", cfg->network_name);
     json_add_string(root, "apPassword", cfg->ap_password);
+    json_add_string(root, "uiPassword", cfg->ui_password);
     cJSON_AddBoolToObject(root, "apEnabled", cfg->ap_enabled);
     svc_nvs_config_merge(root, prop_root);
 
@@ -249,6 +252,7 @@ char *web_ui_json_build_connection_payload(const connection_cfg_t *cfg,
     json_add_string(root, "networkName", cfg->network_name);
     json_add_string(root, "apSsid", ap_ssid);
     json_add_string(root, "apPassword", cfg->ap_password);
+    json_add_string(root, "uiPassword", cfg->ui_password);
     json_add_string(root, "apIpAddress", ap_ip_address);
     cJSON_AddBoolToObject(root, "apEnabled", cfg->ap_enabled);
 
@@ -268,6 +272,8 @@ char *web_ui_json_build_device_details_payload(const char *prop_name,
                                                const char *battery_state,
                                                int battery_voltage_mv,
                                                bool battery_low,
+                                               bool has_cpu_temp,
+                                               float cpu_temp_c,
                                                const char *network_name,
                                                const char *status,
                                                const char *ap_ip_address,
@@ -294,7 +300,11 @@ char *web_ui_json_build_device_details_payload(const char *prop_name,
     char build_date_time[96];
     snprintf(build_date_time, sizeof(build_date_time), "%s %s", build_date ? build_date : "", build_time ? build_time : "");
     json_add_string(root, "buildDate", build_date_time);
-    cJSON_AddNullToObject(root, "cpuTempC");
+    if (has_cpu_temp) {
+        cJSON_AddNumberToObject(root, "cpuTempC", cpu_temp_c);
+    } else {
+        cJSON_AddNullToObject(root, "cpuTempC");
+    }
     cJSON_AddNumberToObject(root, "freeMemoryBytes", (double)free_memory_bytes);
     cJSON_AddNumberToObject(root, "batteryPercent", battery_percent);
     json_add_string(root, "batteryState", battery_state && battery_state[0] ? battery_state : "normal");

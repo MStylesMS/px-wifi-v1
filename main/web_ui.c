@@ -18,6 +18,8 @@
 #include "esp_wifi.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include "driver/temperature_sensor.h"
+#include "mbedtls/base64.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -72,6 +74,9 @@ static void ota_reboot_task(void *arg);
 static bool conn_cfg_lock(void);
 static void conn_cfg_unlock(void);
 static void conn_cfg_snapshot(connection_cfg_t *out);
+static esp_err_t check_ui_auth(httpd_req_t *req);
+static void cpu_temp_init(void);
+static bool cpu_temp_read(float *out_c);
 static esp_err_t apply_connection_fields_from_json(const cJSON *root,
                                                    bool *out_wifi_changed,
                                                    char *validation_error,
@@ -155,6 +160,7 @@ static char s_prop_id[32] = "px-wifi-v1";
 
 static connection_cfg_t s_conn_cfg = WEB_UI_CONNECTION_CFG_DEFAULT;
 static SemaphoreHandle_t s_conn_cfg_mutex;
+static temperature_sensor_handle_t s_temp_sensor;
 static QueueHandle_t s_mqtt_inbound_queue;
 
 static bool conn_cfg_lock(void)
@@ -231,6 +237,75 @@ static esp_err_t send_json_error(httpd_req_t *req,
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, err_payload, HTTPD_RESP_USE_STRLEN);
+}
+
+static void cpu_temp_init(void)
+{
+    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    if (temperature_sensor_install(&cfg, &s_temp_sensor) != ESP_OK) {
+        ESP_LOGW(TAG, "CPU temperature sensor install failed");
+        s_temp_sensor = NULL;
+        return;
+    }
+    if (temperature_sensor_enable(s_temp_sensor) != ESP_OK) {
+        ESP_LOGW(TAG, "CPU temperature sensor enable failed");
+        temperature_sensor_uninstall(s_temp_sensor);
+        s_temp_sensor = NULL;
+    }
+}
+
+static bool cpu_temp_read(float *out_c)
+{
+    if (!s_temp_sensor || !out_c) {
+        return false;
+    }
+    return temperature_sensor_get_celsius(s_temp_sensor, out_c) == ESP_OK;
+}
+
+/* Optional UI password: empty = open UI. Non-empty requires HTTP Basic Auth
+ * (any username; password must match). Browser will prompt once per session. */
+static esp_err_t check_ui_auth(httpd_req_t *req)
+{
+    connection_cfg_t cfg;
+    char auth_hdr[192] = {0};
+    unsigned char decoded[128];
+    size_t olen = 0;
+    char *colon;
+
+    conn_cfg_snapshot(&cfg);
+    if (cfg.ui_password[0] == '\0') {
+        return ESP_OK;
+    }
+
+    if (httpd_req_get_hdr_value_str(req, "Authorization", auth_hdr, sizeof(auth_hdr)) != ESP_OK) {
+        goto unauthorized;
+    }
+    if (strncmp(auth_hdr, "Basic ", 6) != 0) {
+        goto unauthorized;
+    }
+    if (mbedtls_base64_decode(decoded,
+                              sizeof(decoded) - 1,
+                              &olen,
+                              (const unsigned char *)(auth_hdr + 6),
+                              strlen(auth_hdr + 6)) != 0 ||
+        olen == 0) {
+        goto unauthorized;
+    }
+    decoded[olen] = '\0';
+    colon = strchr((char *)decoded, ':');
+    if (!colon) {
+        goto unauthorized;
+    }
+    *colon = '\0';
+    if (strcmp(colon + 1, cfg.ui_password) != 0) {
+        goto unauthorized;
+    }
+    return ESP_OK;
+
+unauthorized:
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"PX-WiFi-V1\"");
+    httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    return ESP_FAIL;
 }
 
 /* Shared connection-field apply used by both /api/config and /api/connection.
@@ -340,6 +415,9 @@ static esp_err_t apply_connection_fields_from_json(const cJSON *root,
     }
     if (web_ui_json_get_string(root, "apPassword", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.ap_password, sizeof(s_conn_cfg.ap_password), value);
+    }
+    if (web_ui_json_get_string(root, "uiPassword", value, sizeof(value))) {
+        copy_bounded_local(s_conn_cfg.ui_password, sizeof(s_conn_cfg.ui_password), value);
     }
     /* SoftAP remains enabled after STA connect; PSK is the access control.
      * Ignore client attempts to disable it so config/connection stay aligned. */
@@ -1135,6 +1213,10 @@ static esp_err_t static_asset_handler(httpd_req_t *req)
     const static_asset_t *asset = (const static_asset_t *)req->user_ctx;
     size_t len;
 
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     if (!asset || !asset->start || !asset->end || asset->end < asset->start) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Asset unavailable");
         return ESP_FAIL;
@@ -1153,6 +1235,11 @@ static esp_err_t static_asset_handler(httpd_req_t *req)
 static esp_err_t state_get_handler(httpd_req_t *req)
 {
     char payload[768];
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     prop_engine_get_state_json(payload, sizeof(payload));
 
     httpd_resp_set_type(req, "application/json");
@@ -1194,8 +1281,14 @@ static void build_unified_config_json(char *out, size_t out_size)
 
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
-    char *payload = (char *)calloc(1, 6144);
+    char *payload = NULL;
     esp_err_t err;
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    payload = (char *)calloc(1, 6144);
 
     if (!payload) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
@@ -1212,6 +1305,11 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 static esp_err_t config_defaults_get_handler(httpd_req_t *req)
 {
     char payload[1024];
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     prop_engine_get_default_config_json(payload, sizeof(payload));
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
@@ -1224,6 +1322,10 @@ static esp_err_t command_post_handler(httpd_req_t *req)
     char command_name[32] = "";
     bool ok = true;
     esp_err_t engine_err;
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     if (read_request_body(req, body, sizeof(body)) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
@@ -1268,6 +1370,10 @@ static esp_err_t ota_upload_post_handler(httpd_req_t *req)
 {
     esp_err_t err;
 
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     if (req->content_len <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing firmware payload");
         return ESP_FAIL;
@@ -1301,6 +1407,10 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     esp_err_t conn_err;
     cJSON *root = NULL;
     connection_cfg_t cfg_snap;
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     if (req->content_len <= 0 || req->content_len > WEB_UI_MAX_JSON_BODY_LEN) {
         httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "Request body too large");
@@ -1389,6 +1499,10 @@ static esp_err_t config_restore_post_handler(httpd_req_t *req)
     bool persist = strstr(req->uri, "/save") != NULL;
     esp_err_t engine_err;
 
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     engine_err = prop_engine_restore_defaults(false, response, sizeof(response));
     if (engine_err == ESP_ERR_TIMEOUT) {
         return send_json_error(req, "503 Service Unavailable", "busy");
@@ -1417,6 +1531,10 @@ static esp_err_t connection_get_handler(httpd_req_t *req)
     char ap_ssid[33] = "Paradox-PXWiFiV1";
     connection_cfg_t cfg_snap;
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     mqtt_build_topic(commands_topic, sizeof(commands_topic), "commands");
     mqtt_build_topic(state_topic, sizeof(state_topic), "state");
@@ -1465,6 +1583,10 @@ static esp_err_t connection_post_handler(httpd_req_t *req)
     esp_err_t conn_err;
     cJSON *root = NULL;
     connection_cfg_t cfg_snap;
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     if (req->content_len <= 0 || req->content_len > WEB_UI_MAX_JSON_BODY_LEN) {
         httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "Request body too large");
@@ -1572,10 +1694,16 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     int battery = -1;
     int battery_voltage_mv = 0;
     bool battery_low = false;
+    float cpu_temp_c = 0.0f;
+    bool has_cpu_temp = false;
     int64_t free_heap = (int64_t)esp_get_free_heap_size();
     const esp_app_desc_t *app = esp_app_get_description();
     char ap_ip_text[32] = "192.168.4.1";
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     if (ap_netif) {
         esp_netif_ip_info_t ip_info;
@@ -1590,6 +1718,7 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
     (void)json_extract_string_local(state_json, "batteryState", battery_state, sizeof(battery_state));
     (void)json_extract_int_local(state_json, "batteryVoltageMv", &battery_voltage_mv);
     (void)json_extract_bool_local(state_json, "lowBattery", &battery_low);
+    has_cpu_temp = cpu_temp_read(&cpu_temp_c);
 
     char *payload;
     svc_wifi_status_t wifi_status;
@@ -1609,6 +1738,8 @@ static esp_err_t device_details_get_handler(httpd_req_t *req)
                                                        battery_state,
                                                        battery_voltage_mv,
                                                        battery_low,
+                                                       has_cpu_temp,
+                                                       cpu_temp_c,
                                                        cfg_snap.network_name,
                                                        game_state,
                                                        ap_ip_text,
@@ -1637,6 +1768,10 @@ static esp_err_t device_name_post_handler(httpd_req_t *req)
     char name_in[64];
     char network_name[sizeof(s_conn_cfg.network_name)];
     char *response;
+
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     if (read_request_body(req, body, sizeof(body)) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
@@ -1690,6 +1825,10 @@ static esp_err_t connection_scan_get_handler(httpd_req_t *req)
     char ssid_escaped[96];
     char auth_escaped[48];
 
+    if (check_ui_auth(req) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     esp_err_t err = svc_wifi_scan_networks(records, &count);
     if (err != ESP_OK) {
         httpd_resp_set_type(req, "application/json");
@@ -1732,6 +1871,9 @@ static esp_err_t connection_scan_get_handler(httpd_req_t *req)
 static esp_err_t ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
+        if (check_ui_auth(req) != ESP_OK) {
+            return ESP_FAIL;
+        }
         ESP_LOGI(TAG, "WebSocket handshake complete");
         return ESP_OK;
     }
@@ -1886,6 +2028,7 @@ esp_err_t web_ui_start(void)
 
     build_default_identity();
     (void)apply_mdns_hostname();
+    cpu_temp_init();
 
     conn_cfg_snapshot(&cfg_snap);
     if (cfg_snap.wifi_ssid[0] != '\0') {

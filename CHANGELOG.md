@@ -7,6 +7,38 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ## [Unreleased]
 
+## [0.35] - 2026-07-20
+
+### Added
+
+- Connect page: optional **UI Login Password** (HTTP Basic Auth). Empty = open UI;
+  when set, browser prompts before pages/APIs load. Any username; password must match.
+- Device Details: CPU temperature from the ESP32-S3 on-chip sensor.
+
+### Changed
+
+- Connect page: Battery field uses the same USB/percent/voltage formatting as Live.
+- Connect page: **URL on Local Network** and **UI Login Password** share one half-width row.
+- Connect page: MQTT Topic Settings spacing cleaned up (removed Game State hint;
+  derived topics use a consistent value style).
+- Config page: Runtime Config action buttons moved into the panel header (right-aligned).
+
+## [0.34] - 2026-07-20
+
+### Added
+
+- Connect page: **Reboot** button soft-reboots the prop via `{"command":"reboot"}`.
+
+### Changed
+
+- Connect page: renamed **Local URL** to **URL on Local Network**.
+- Connect page: AP SSID and AP Password are now half-width fields on the same row
+  (SSID label above a read-only box).
+- Connect page: Game State Topic hint clarifies the value is used as-is
+  (e.g. `paradox/agent22/state`) — `/state` is not appended.
+
+## [0.33] - 2026-07-12
+
 ### Added
 
 - `main.c`/`prop_engine.h`: countdown timer now emits a short 1 Hz beep during

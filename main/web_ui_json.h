@@ -21,6 +21,7 @@ typedef struct {
     char mqtt_prop_announce_topic[128];
     char network_name[33];
     char ap_password[65];
+    char ui_password[65];
     bool ap_enabled;
 } connection_cfg_t;
 
@@ -36,6 +37,7 @@ typedef struct {
     .mqtt_prop_announce_topic = "site/props", \
     .network_name = "", \
     .ap_password = "", \
+    .ui_password = "", \
     .ap_enabled = true, \
 }
 
@@ -80,6 +82,8 @@ char *web_ui_json_build_device_details_payload(const char *prop_name,
                                                const char *battery_state,
                                                int battery_voltage_mv,
                                                bool battery_low,
+                                               bool has_cpu_temp,
+                                               float cpu_temp_c,
                                                const char *network_name,
                                                const char *status,
                                                const char *ap_ip_address,
