@@ -187,13 +187,13 @@
                 mqttPort: 1883,
                 mqttUsername: "",
                 mqttPassword: "",
-                mqttBaseTopic: "site/room/zone",
-                mqttCommandTopic: "site/room/zone/commands",
-                mqttStateTopic: "site/room/zone/state",
-                mqttEventsTopic: "site/room/zone/events",
-                mqttWarningsTopic: "site/room/zone/warnings",
-                mqttGameStateTopic: "site/room/state",
-                mqttPropAnnounceTopic: "site/props",
+                mqttBaseTopic: "paradox/room/device",
+                mqttCommandTopic: "paradox/room/device/commands",
+                mqttStateTopic: "paradox/room/device/state",
+                mqttEventsTopic: "paradox/room/device/events",
+                mqttWarningsTopic: "paradox/room/device/warnings",
+                mqttGameStateTopic: "paradox/room/state",
+                mqttPropAnnounceTopic: "paradox/props",
                 networkName: "px-wifi-v1-a1b2",
                 apSsid: "Paradox-PXWiFiV1-A1B2",
                 apIpAddress: "192.168.4.1",
@@ -774,7 +774,7 @@
             el("mqttPort").value = cfg.mqttPort || 1883;
             el("mqttUsername").value = cfg.mqttUsername || "";
             el("mqttPassword").value = cfg.mqttPassword || "";
-            el("mqttBaseTopic").value = cfg.mqttBaseTopic || "site/room/zone";
+            el("mqttBaseTopic").value = cfg.mqttBaseTopic || "paradox/room/device";
             el("mqttCommandTopic").textContent = cfg.mqttCommandTopic || "";
             el("mqttStateTopic").textContent = cfg.mqttStateTopic || "";
             el("mqttEventsTopic").textContent = cfg.mqttEventsTopic || "";

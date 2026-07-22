@@ -266,7 +266,9 @@ Send JSON payloads to `paradox/{site}/{zone}/commands`:
 
 ### Monitoring State
 
-The device publishes real-time state to `paradox/{site}/{zone}/state`:
+The device publishes retained state to `{mqttBaseTopic}/state`
+(default placeholder `paradox/room/device/state`; venue installs should use
+`paradox/<room>/<device>/state`):
 
 ```json
 {
@@ -279,9 +281,14 @@ The device publishes real-time state to `paradox/{site}/{zone}/state`:
 }
 ```
 
+State is published on connect, after state-changing commands, and on the
+heartbeat interval (default 10 s). Separately, on each MQTT connect the device
+publishes a **one-shot announce** to `mqttPropAnnounceTopic` (default
+`paradox/props`, or `<company>/props` for third-party namespaces).
+
 ### Events
 
-Player actions are published to `paradox/{site}/{zone}/events`:
+Player actions are published to `{mqttBaseTopic}/events`:
 
 ```json
 {"event": "wireDisconnected", "data": {"wire": 1, "correct": true}}

@@ -112,13 +112,13 @@ Example response (abbreviated):
   "wifiPassword": "secret",
   "mqttHost": "192.168.1.50",
   "mqttPort": 1883,
-  "mqttBaseTopic": "site/room/zone",
-  "mqttCommandTopic": "site/room/zone/commands",
-  "mqttStateTopic": "site/room/zone/state",
-  "mqttEventsTopic": "site/room/zone/events",
-  "mqttWarningsTopic": "site/room/zone/warnings",
-  "mqttGameStateTopic": "site/room/state",
-  "mqttPropAnnounceTopic": "site/props",
+  "mqttBaseTopic": "paradox/room/device",
+  "mqttCommandTopic": "paradox/room/device/commands",
+  "mqttStateTopic": "paradox/room/device/state",
+  "mqttEventsTopic": "paradox/room/device/events",
+  "mqttWarningsTopic": "paradox/room/device/warnings",
+  "mqttGameStateTopic": "paradox/room/state",
+  "mqttPropAnnounceTopic": "paradox/props",
   "networkName": "px-wifi-v1-a1b2",
   "apEnabled": true,
   "defaultTime": 3600,
@@ -203,13 +203,13 @@ Example response:
   "mqttPort": 1883,
   "mqttUsername": "",
   "mqttPassword": "",
-  "mqttBaseTopic": "site/room/zone",
-  "mqttCommandTopic": "site/room/zone/commands",
-  "mqttStateTopic": "site/room/zone/state",
-  "mqttEventsTopic": "site/room/zone/events",
-  "mqttWarningsTopic": "site/room/zone/warnings",
-  "mqttGameStateTopic": "site/room/state",
-  "mqttPropAnnounceTopic": "site/props",
+  "mqttBaseTopic": "paradox/room/device",
+  "mqttCommandTopic": "paradox/room/device/commands",
+  "mqttStateTopic": "paradox/room/device/state",
+  "mqttEventsTopic": "paradox/room/device/events",
+  "mqttWarningsTopic": "paradox/room/device/warnings",
+  "mqttGameStateTopic": "paradox/room/state",
+  "mqttPropAnnounceTopic": "paradox/props",
   "networkName": "px-wifi-v1-a1b2",
   "apSsid": "Paradox-PXWiFiV1-A1B2",
   "apPassword": "",
@@ -374,7 +374,7 @@ All commands use `{"command": "<name>", ...parameters}`. Commands are deduplicat
 Health check.
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"ping"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"ping"}'
 ```
 
 Response: `{"event":"pong","ts":<ms>}`
@@ -386,7 +386,7 @@ Response: `{"event":"pong","ts":<ms>}`
 Forces an immediate state publish and returns the full state object.
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"getState"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"getState"}'
 ```
 
 Response: full state JSON (same as `GET /api/state`).
@@ -402,9 +402,9 @@ Start the countdown. Device must be in `ready` state (all wires connected).
 | `time` | int \| string | No | Override timer. Integer = seconds; `"MM:SS"` or `"HH:MM:SS"` string also accepted |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"start"}'
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"start","time":900}'
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"start","time":"15:00"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"start"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"start","time":900}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"start","time":"15:00"}'
 ```
 
 Responses:
@@ -425,7 +425,7 @@ Resume from `paused`, `ready`, or `not_ready` → `countdown`.
 | `time` | int \| string | No | Override timer (same formats as `start`) |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"resume"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"resume"}'
 ```
 
 Response: `{"ok":true,"state":"countdown"}` or `{"ok":false,"error":"notPaused"}`
@@ -437,7 +437,7 @@ Response: `{"ok":true,"state":"countdown"}` or `{"ok":false,"error":"notPaused"}
 Pause a running countdown.
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"pause"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"pause"}'
 ```
 
 Response: `{"ok":true,"state":"paused"}` or `{"ok":false,"error":"notRunning"}`
@@ -449,7 +449,7 @@ Response: `{"ok":true,"state":"paused"}` or `{"ok":false,"error":"notRunning"}`
 Same as `pause` but also sets a `stopped` flag that causes the display to blink at 1 Hz.
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"stop"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"stop"}'
 ```
 
 Response: `{"ok":true,"state":"paused"}` or `{"ok":false,"error":"notRunning"}`
@@ -465,8 +465,8 @@ Reset the round. Restores `defaultTime`, clears tries and disconnect order, retu
 | `time` | int \| string | No | Set a specific time instead of restoring `defaultTime` |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"reset"}'
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"reset","time":600}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"reset"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"reset","time":600}'
 ```
 
 Response: `{"ok":true,"state":"ready"}` or `{"ok":true,"state":"not_ready","disconnected":"..."}`
@@ -482,8 +482,8 @@ Update the timer value without changing game state.
 | `time` | int \| string | Yes | Seconds (int) or `"MM:SS"` / `"HH:MM:SS"` |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"setTime","time":300}'
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"setTime","time":"5:00"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"setTime","time":300}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"setTime","time":"5:00"}'
 ```
 
 Response: `{"ok":true,"time":300}` or `{"ok":false,"error":"missingTime"}`
@@ -506,7 +506,7 @@ Change the puzzle mode.
 | `buzz` | Wrong wire triggers buzzer but no penalty; `maxTries` attempts before detonation |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands \
+mosquitto_pub -h <broker> -t paradox/room/device/commands \
   -m '{"command":"setMode","mode":"penalty","maxTries":3}'
 ```
 
@@ -523,7 +523,7 @@ Set the per-wrong-wire time penalty (used in `penalty` mode).
 | `amount` | integer | Yes | Seconds (0–3600) |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands \
+mosquitto_pub -h <broker> -t paradox/room/device/commands \
   -m '{"command":"setPenalty","amount":60}'
 ```
 
@@ -541,7 +541,7 @@ Set the wire-disconnect solution and wire count. Resets the current round.
 | `wireCount` | integer | No | 1–8 (defaults to current) |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands \
+mosquitto_pub -h <broker> -t paradox/room/device/commands \
   -m '{"command":"setSequence","solution":"3124","wireCount":4}'
 ```
 
@@ -560,7 +560,7 @@ Configure how the lid sensor input is interpreted.
 `"ignore"` maps to `"off"`; `"normallyClosed"` maps to `"closed"`; `"normallyOpen"` maps to `"open"`.
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands \
+mosquitto_pub -h <broker> -t paradox/room/device/commands \
   -m '{"command":"setLidMode","mode":"closed"}'
 ```
 
@@ -573,7 +573,7 @@ Response: `{"ok":true,"lidMode":"closed"}` or `{"ok":false,"error":"invalidLidMo
 Force the prop into `defused` state. Only valid during `countdown` or `paused`.
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"solve"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"solve"}'
 ```
 
 Response: `{"ok":true,"state":"defused"}` or `{"ok":false,"error":"notActive"}`
@@ -585,7 +585,7 @@ Response: `{"ok":true,"state":"defused"}` or `{"ok":false,"error":"notActive"}`
 Force the prop into `detonated` state. Sets `timeRemaining` to 0. Only valid during `countdown` or `paused`.
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"fail"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"fail"}'
 ```
 
 Response: `{"ok":true,"state":"detonated"}` or `{"ok":false,"error":"notActive"}`
@@ -601,7 +601,7 @@ Simulate a wire disconnect on the given input. Useful for testing without hardwa
 | `input` | integer | Yes | Input number 1–8 |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands \
+mosquitto_pub -h <broker> -t paradox/room/device/commands \
   -m '{"command":"disconnect","input":2}'
 ```
 
@@ -618,7 +618,7 @@ Simulate a wire reconnect on the given input.
 | `input` | integer | Yes | Input number 1–8 |
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands \
+mosquitto_pub -h <broker> -t paradox/room/device/commands \
   -m '{"command":"connect","input":2}'
 ```
 
@@ -631,7 +631,7 @@ Response: `{"ok":true,"input":2}` or `{"ok":false,"error":"missingInput"}`
 Acknowledge presence (no side-effects beyond acknowledgement).
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"identify"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"identify"}'
 ```
 
 Response: `{"ok":true,"command":"wake"}`
@@ -643,7 +643,7 @@ Response: `{"ok":true,"command":"wake"}`
 Schedule a device reboot (~1.2 s delay).
 
 ```bash
-mosquitto_pub -h <broker> -t site/room/zone/commands -m '{"command":"reboot"}'
+mosquitto_pub -h <broker> -t paradox/room/device/commands -m '{"command":"reboot"}'
 ```
 
 Response: `{"ok":true,"command":"reboot"}`
@@ -658,7 +658,7 @@ Response: `{"ok":false,"error":"unknownCommand"}`
 
 ## 5. MQTT
 
-All topics are rooted at the configured `mqttBaseTopic` (default `site/room/zone`). The device connects with a persistent session (clean session = false), client ID = `networkName`, keep-alive 60 s, QoS 1 for all publishes and subscriptions.
+All topics are rooted at the configured `mqttBaseTopic` (default `paradox/room/device`). The device connects with a persistent session (clean session = false), client ID = `networkName`, keep-alive 60 s, QoS 1 for all publishes and subscriptions.
 
 ### 5.1 Topic map
 
@@ -720,7 +720,12 @@ Published when a command response has `ok: false` or contains an `error` field.
 
 ### 5.5 Announce topic (`<mqttPropAnnounceTopic>`)
 
-Published once on each successful MQTT connect (default topic: `site/props`).
+Published **once** on each successful MQTT connect or reconnect (not on the heartbeat
+interval). Default topic: `paradox/props`.
+
+Third-party venues may set this to `<company>/props` when they want their own namespace;
+the suite default remains `paradox/props`. Periodic prop state belongs on
+`<base>/state` (typically `paradox/<room>/<device>/state`), never on the announce topic.
 
 ```json
 {
@@ -737,8 +742,8 @@ Published once on each successful MQTT connect (default topic: `site/props`).
   "buildId": "0.1.0",
   "buildDate": "May 20 2026",
   "buildTime": "10:00:00",
-  "stateTopic": "site/room/zone/state",
-  "commandsTopic": "site/room/zone/commands"
+  "stateTopic": "paradox/room/device/state",
+  "commandsTopic": "paradox/room/device/commands"
 }
 ```
 
@@ -807,9 +812,9 @@ All fields can be set via `POST /api/config/save` or `POST /api/connection`. The
 | `mqttPort` | integer | `1883` | |
 | `mqttUsername` | string | `""` | Max 63 chars |
 | `mqttPassword` | string | `""` | Max 63 chars |
-| `mqttBaseTopic` | string | `"site/room/zone"` | Max 95 chars |
-| `mqttGameStateTopic` | string | `"site/room/state"` | Max 127 chars; keep-sync source. Used as-is — include `/state` in the value; nothing is appended. |
-| `mqttPropAnnounceTopic` | string | `"site/props"` | Max 127 chars; announce destination |
+| `mqttBaseTopic` | string | `"paradox/room/device"` | Max 95 chars |
+| `mqttGameStateTopic` | string | `"paradox/room/state"` | Max 127 chars; keep-sync source. Used as-is — include `/state` in the value; nothing is appended. |
+| `mqttPropAnnounceTopic` | string | `"paradox/props"` | Max 127 chars; **one-shot** announce on connect/reconnect. May be `<company>/props` for third-party installs. |
 | `heartbeatInterval` | integer (ms) | `10000` | MQTT state publish interval (1000–120000 ms) |
 
 ### Battery

@@ -379,12 +379,16 @@ When keep-sync is enabled in configuration:
 
 #### 6.8.2 Prop State and Announce Strategy
 
-The device implements the Paradox standard prop/app state + announce pattern:
+The device implements the Paradox standard prop announce + state pattern:
 
-- **Prop state heartbeat** (periodic): published every N seconds (default: 10s) to `paradox/state` (configurable).
-- **Announce** (event-based): published immediately upon WiFi+MQTT reconnect after >30s offline.
+| Channel | Cadence | Default topic | Purpose |
+|---------|---------|---------------|---------|
+| **Announce** | Once per MQTT connect/reconnect | `paradox/props` | Discovery for PxH props panel / PxP catalog. Third-party installs may use `<company>/props`. |
+| **State (heartbeat)** | Connect, on change, every ~10s | `{mqttBaseTopic}/state` (e.g. `paradox/<room>/<device>/state`) | Retained live prop snapshot |
 
-State/Announce JSON:
+Do **not** publish periodic heartbeats on the announce topic.
+
+State/Announce JSON (illustrative; see `docs/api.md` for the live schemas):
 
 ```json
 {

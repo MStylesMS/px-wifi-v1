@@ -590,7 +590,7 @@ static void trim_whitespace_inplace(char *s)
  * stable default when the mutex is unavailable. */
 static const char *mqtt_base_topic_or_default(void)
 {
-    return s_conn_cfg.mqtt_base_topic[0] != '\0' ? s_conn_cfg.mqtt_base_topic : "site/room/zone";
+    return s_conn_cfg.mqtt_base_topic[0] != '\0' ? s_conn_cfg.mqtt_base_topic : "paradox/room/device";
 }
 
 static void mqtt_build_topic_locked(char *out, size_t out_size, const char *suffix)
@@ -603,7 +603,7 @@ static const char *prop_led_hint_name_local(prop_led_hint_t hint);
 static void mqtt_build_topic(char *out, size_t out_size, const char *suffix)
 {
     if (!conn_cfg_lock()) {
-        snprintf(out, out_size, "site/room/zone/%s", suffix ? suffix : "");
+        snprintf(out, out_size, "paradox/room/device/%s", suffix ? suffix : "");
         return;
     }
     mqtt_build_topic_locked(out, out_size, suffix);

@@ -32,9 +32,9 @@ typedef struct {
     .mqtt_port = 1883, \
     .mqtt_username = "", \
     .mqtt_password = "", \
-    .mqtt_base_topic = "site/room/zone", \
-    .mqtt_game_state_topic = "site/room/state", \
-    .mqtt_prop_announce_topic = "site/props", \
+    .mqtt_base_topic = "paradox/room/device", \
+    .mqtt_game_state_topic = "paradox/room/state", \
+    .mqtt_prop_announce_topic = "paradox/props", \
     .network_name = "", \
     .ap_password = "", \
     .ui_password = "", \
