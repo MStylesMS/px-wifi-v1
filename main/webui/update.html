@@ -45,7 +45,7 @@
                 log("Uploading " + file.name + " (" + file.size + " bytes)...");
 
                 try {
-                    var res = await fetch("/api/ota/upload", {
+                    var res = await fetch("api/ota/upload", {
                         method: "POST",
                         headers: {
                             "Content-Type": "application/octet-stream"

@@ -26,6 +26,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lib_json_helper.h"
+#include "lib_http_proxy.h"
 #include "svc_wifi.h"
 #include "svc_mqtt.h"
 #include "svc_ota.h"
@@ -1212,6 +1213,8 @@ static esp_err_t static_asset_handler(httpd_req_t *req)
 {
     const static_asset_t *asset = (const static_asset_t *)req->user_ctx;
     size_t len;
+    bool is_html;
+    px_http_proxy_ctx_t proxy;
 
     if (check_ui_auth(req) != ESP_OK) {
         return ESP_FAIL;
@@ -1227,8 +1230,38 @@ static esp_err_t static_asset_handler(httpd_req_t *req)
     if (len > 0 && asset->start[len - 1] == '\0') {
         len--;
     }
+
+    is_html = asset->content_type &&
+              strncmp(asset->content_type, "text/html", 9) == 0;
+    px_http_proxy_read(req, &proxy);
+
     httpd_resp_set_type(req, asset->content_type);
     httpd_resp_set_hdr(req, "Cache-Control", asset->cache_control);
+
+    if (is_html && proxy.has_prefix) {
+        char *html = (char *)malloc(len + PX_HTTP_PROXY_PREFIX_MAX + 64);
+        int injected_len;
+
+        if (!html) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+            return ESP_ERR_NO_MEM;
+        }
+        memcpy(html, asset->start, len);
+        html[len] = '\0';
+        injected_len = px_http_proxy_inject_base_tag(html,
+                                                     len,
+                                                     len + PX_HTTP_PROXY_PREFIX_MAX + 64,
+                                                     &proxy);
+        if (injected_len < 0) {
+            free(html);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "HTML rewrite failed");
+            return ESP_FAIL;
+        }
+        esp_err_t err = httpd_resp_send(req, html, injected_len);
+        free(html);
+        return err;
+    }
+
     return httpd_resp_send(req, (const char *)asset->start, (int)len);
 }
 

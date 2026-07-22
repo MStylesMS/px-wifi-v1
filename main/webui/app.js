@@ -37,6 +37,10 @@
         localStorage.setItem(KEY_DEMO, enabled ? "1" : "0");
     }
 
+    function normalizeApiPath(path) {
+        return path.startsWith("/") ? path.slice(1) : path;
+    }
+
     async function api(path, options) {
         if (getDemoMode()) {
             return mockResponse(path, options);
@@ -44,7 +48,8 @@
 
         const originBase = getCurrentOriginBase();
         const base = getApiBase().replace(/\/$/, "");
-        const requestUrl = originBase ? path : (base + path);
+        const rel = normalizeApiPath(path);
+        const requestUrl = originBase ? rel : (base + "/" + rel);
         const res = await fetch(requestUrl, options);
         const rawText = await res.text();
         let data = null;
