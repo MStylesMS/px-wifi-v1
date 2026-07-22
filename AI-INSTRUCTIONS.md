@@ -1,4 +1,4 @@
-﻿# px-wifi-v1 — AI Instructions
+# px-wifi-v1 — AI Instructions
 
 ESP32 Wi-Fi smart-prop firmware for Paradox escape rooms.
 
@@ -20,3 +20,7 @@ Do **not** publish frequent state to the announce topic. Keep docs and firmware 
 - **Prop admin reverse proxy:** HTTP UI honours `X-Forwarded-Prefix` via
   `px-components/lib_http_proxy` (injects `<base href>` into HTML). Client
   assets/API calls use path-relative URLs. See PxD `docs/PROP_ADMIN_REVERSE_PROXY.md`.
+
+## Suite standards
+
+Suite-wide contracts live in [../../../apps/PxH/docs/standards/](../../../apps/PxH/docs/standards/) (folder, not a single file). Read those before changing MQTT topics or shared conventions. If you change a standard, update the file under PxH `docs/standards/` first and propagate to other repos' docs in the same work.
