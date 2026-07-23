@@ -23,4 +23,7 @@ Do **not** publish frequent state to the announce topic. Keep docs and firmware 
 
 ## Suite standards
 
-Suite-wide contracts live in [../../../apps/PxH/docs/standards/](../../../apps/PxH/docs/standards/) (folder, not a single file). Read those before changing MQTT topics or shared conventions. If you change a standard, update the file under PxH `docs/standards/` first and propagate to other repos' docs in the same work.
+Public suite brief + contracts live in [../../../apps/PxH/docs/standards/](../../../apps/PxH/docs/standards/) (folder, not a single file) — especially `AI-INSTRUCTIONS.md` and `MQTT-CONTRACT.md`. Read those before changing MQTT topics or shared conventions. If you change a standard, update the file under PxH `docs/standards/` first and propagate to other repos' docs in the same work.
+
+If the workspace has `Px-Suite/` (or `/opt/paradox/Px-Suite`), use it for internal notes, cross-cutting pending plans, and business overview — do not put those into distributed PxH standards.
+
