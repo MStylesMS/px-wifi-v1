@@ -8,9 +8,9 @@ import urllib.error
 import urllib.request
 
 
-def request_json(method, url, payload=None, timeout=5.0):
+def request_text(method, url, payload=None, timeout=5.0, extra_headers=None):
     data = None
-    headers = {}
+    headers = dict(extra_headers or {})
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -18,7 +18,12 @@ def request_json(method, url, payload=None, timeout=5.0):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8")
-        return resp.status, json.loads(body)
+        return resp.status, body
+
+
+def request_json(method, url, payload=None, timeout=5.0, extra_headers=None):
+    status, body = request_text(method, url, payload=payload, timeout=timeout, extra_headers=extra_headers)
+    return status, json.loads(body)
 
 
 def print_step(title):
@@ -243,12 +248,50 @@ def run_persist_check(base_url):
     print_json("persisted config", config)
 
 
+def run_proxy_verify(base_url, proxy_prefix, proxy_host=None, proxy_proto="https"):
+    prefix = proxy_prefix.rstrip("/")
+    headers = {
+        "X-Forwarded-Prefix": prefix,
+        "X-Forwarded-Proto": proxy_proto,
+    }
+    if proxy_host:
+        headers["X-Forwarded-Host"] = proxy_host
+
+    print_step("GET / with reverse-proxy forwarded headers")
+    status, html = request_text("GET", f"{base_url}/", extra_headers=headers)
+    ensure(status == 200, f"index returned HTTP {status}")
+    expected_base = f'<base href="{prefix}/">'
+    ensure(expected_base in html, f"missing injected base tag: {expected_base}")
+    print(f"found {expected_base}")
+
+    print_step("GET /api/state with forwarded headers (prop route unchanged)")
+    status, state = request_json("GET", f"{base_url}/api/state", extra_headers=headers)
+    ensure(status == 200, f"state returned HTTP {status}")
+    ensure("gameState" in state, "state payload missing gameState")
+    print_json("state", state)
+
+
 def main():
     parser = argparse.ArgumentParser(description="PX-WiFi-V1 HTTP smoke test")
     parser.add_argument("--host", default="192.168.4.1", help="Device host or IP")
     parser.add_argument(
+        "--proxy-prefix",
+        help="Verify reverse-proxy support (e.g. /props/suitcase); sends X-Forwarded-* headers",
+    )
+    parser.add_argument(
+        "--proxy-host",
+        default="room-controller.example",
+        help="Value for X-Forwarded-Host during proxy verification",
+    )
+    parser.add_argument(
+        "--proxy-proto",
+        default="https",
+        choices=["http", "https"],
+        help="Value for X-Forwarded-Proto during proxy verification",
+    )
+    parser.add_argument(
         "--mode",
-        choices=["smoke", "commands", "time-formats", "persist-save", "persist-check", "all"],
+        choices=["smoke", "commands", "time-formats", "persist-save", "persist-check", "proxy", "all"],
         default="all",
         help="Which test phase to run",
     )
@@ -257,6 +300,12 @@ def main():
     base_url = f"http://{args.host}"
 
     try:
+        if args.proxy_prefix or args.mode == "proxy":
+            ensure(args.proxy_prefix, "--proxy-prefix is required for proxy verification")
+            run_proxy_verify(base_url, args.proxy_prefix, args.proxy_host, args.proxy_proto)
+            if args.mode == "proxy":
+                return 0
+
         if args.mode in ("smoke", "all"):
             run_smoke(base_url)
         if args.mode in ("commands", "all"):

@@ -7,6 +7,20 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ## [Unreleased]
 
+## [0.37] - 2026-07-23
+
+### Added
+
+- Reverse-proxy verification mode in `scripts/prop_http_smoke_test.py`
+  (`--mode proxy --proxy-prefix /props/<label>/`).
+
+### Changed
+
+- HTTP admin UI: path-relative API `fetch` when served over http(s) (works with
+  firmware-injected `<base href>` behind Room Controller nginx; no nginx
+  `sub_filter` on `/api/` required).
+- Depends on px-components `lib_http_proxy` 0.82 (`build_url`, `build_ws_url`).
+
 ## [0.36] - 2026-07-21
 
 ### Added

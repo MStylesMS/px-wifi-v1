@@ -17,9 +17,10 @@ Do **not** publish frequent state to the announce topic. Keep docs and firmware 
 ## Other conventions
 
 - Keep firmware docs (`docs/`) aligned with behaviour changes.
-- **Prop admin reverse proxy:** HTTP UI honours `X-Forwarded-Prefix` via
-  `px-components/lib_http_proxy` (injects `<base href>` into HTML). Client
-  assets/API calls use path-relative URLs. See PxD `docs/PROP_ADMIN_REVERSE_PROXY.md`.
+- **Prop admin reverse proxy:** HTTP UI honours `X-Forwarded-Prefix` / Host /
+  Proto via `px-components/lib_http_proxy` (injects `<base href>`, `build_url`,
+  `build_ws_url`). Client assets/API calls use path-relative URLs. See PxD
+  `docs/PROP_ADMIN_REVERSE_PROXY.md`.
 
 ## Suite standards
 

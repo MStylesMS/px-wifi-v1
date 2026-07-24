@@ -10,17 +10,13 @@
         return new Date().toISOString();
     }
 
-    function getCurrentOriginBase() {
-        if (window.location.protocol === "http:" || window.location.protocol === "https:") {
-            return window.location.origin;
-        }
-        return "";
+    function isServedOverHttp() {
+        return window.location.protocol === "http:" || window.location.protocol === "https:";
     }
 
     function getApiBase() {
-        const originBase = getCurrentOriginBase();
-        if (originBase) {
-            return originBase;
+        if (isServedOverHttp()) {
+            return window.location.origin;
         }
         return localStorage.getItem(KEY_BASE) || "http://192.168.4.1";
     }
@@ -46,10 +42,8 @@
             return mockResponse(path, options);
         }
 
-        const originBase = getCurrentOriginBase();
-        const base = getApiBase().replace(/\/$/, "");
         const rel = normalizeApiPath(path);
-        const requestUrl = originBase ? rel : (base + "/" + rel);
+        const requestUrl = isServedOverHttp() ? rel : (getApiBase().replace(/\/$/, "") + "/" + rel);
         const res = await fetch(requestUrl, options);
         const rawText = await res.text();
         let data = null;
