@@ -821,7 +821,7 @@ All fields can be set via `POST /api/config/save` or `POST /api/connection`. The
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `batteryProfile` | string | `"unknown"` | `"6v-lead-acid"` \| `"6v-LiFePO4"` \| `"12v-lead-acid"` \| `"12v-LiFePO4"` \| `"external"` \| `"unknown"` |
+| `batteryProfile` | string | `"unknown"` | `"6v-lead-acid"` \| `"6v-LiFePO4"` \| `"12v-lead-acid"` \| `"12v-LiFePO4"` \| `"12v-Li-ion"` \| `"external"` \| `"unknown"` |
 | `batteryPoints` | string | — | Custom curve, CSV `"v:pct,v:pct,..."` (used when profile = `"custom"`) |
 | `lowBatteryPercent` | integer | `40` | Threshold for `lowBattery` flag (0–100) |
 | `lowBatteryCutoffPercent` | integer | `20` | Threshold for cutoff behaviour (0–100) |

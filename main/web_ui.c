@@ -133,14 +133,14 @@ static const static_asset_t ASSET_STYLES = {
     .start = styles_css_start,
     .end = styles_css_end,
     .content_type = "text/css; charset=utf-8",
-    .cache_control = "no-store",
+    .cache_control = "public, max-age=300",
 };
 
 static const static_asset_t ASSET_APP_JS = {
     .start = app_js_start,
     .end = app_js_end,
     .content_type = "application/javascript; charset=utf-8",
-    .cache_control = "no-store",
+    .cache_control = "public, max-age=300",
 };
 
 static const static_asset_t ASSET_UPDATE = {
@@ -1209,6 +1209,38 @@ static void mqtt_state_task(void *arg)
     }
 }
 
+/* Send a body in modest chunks. A single httpd_resp_send() of a large
+ * embedded asset (app.js ~42KB, logo ~130KB) under concurrent browser
+ * requests has been observed to reset the TCP session (browser sees
+ * net::ERR_CONNECTION_RESET) while sequential curl downloads succeed.
+ * Chunking keeps each socket write within the TCP send window and plays
+ * nicer with the default lwIP / httpd backlog. */
+#define STATIC_ASSET_CHUNK_SIZE 2048
+
+static esp_err_t send_bytes_chunked(httpd_req_t *req, const char *data, size_t len)
+{
+    size_t offset = 0;
+
+    while (offset < len) {
+        size_t chunk = len - offset;
+        esp_err_t err;
+
+        if (chunk > STATIC_ASSET_CHUNK_SIZE) {
+            chunk = STATIC_ASSET_CHUNK_SIZE;
+        }
+        err = httpd_resp_send_chunk(req, data + offset, (ssize_t)chunk);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "static asset chunk send failed at %u/%u: %s",
+                     (unsigned)offset, (unsigned)len, esp_err_to_name(err));
+            (void)httpd_resp_send_chunk(req, NULL, 0);
+            return err;
+        }
+        offset += chunk;
+    }
+
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t static_asset_handler(httpd_req_t *req)
 {
     const static_asset_t *asset = (const static_asset_t *)req->user_ctx;
@@ -1241,6 +1273,7 @@ static esp_err_t static_asset_handler(httpd_req_t *req)
     if (is_html && proxy.has_prefix) {
         char *html = (char *)malloc(len + PX_HTTP_PROXY_PREFIX_MAX + 64);
         int injected_len;
+        esp_err_t err;
 
         if (!html) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
@@ -1257,12 +1290,12 @@ static esp_err_t static_asset_handler(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "HTML rewrite failed");
             return ESP_FAIL;
         }
-        esp_err_t err = httpd_resp_send(req, html, injected_len);
+        err = send_bytes_chunked(req, html, (size_t)injected_len);
         free(html);
         return err;
     }
 
-    return httpd_resp_send(req, (const char *)asset->start, (int)len);
+    return send_bytes_chunked(req, (const char *)asset->start, len);
 }
 
 static esp_err_t state_get_handler(httpd_req_t *req)
@@ -2080,6 +2113,16 @@ esp_err_t web_ui_start(void)
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.max_uri_handlers = 40;
     config.stack_size = 12288;
+    /* httpd reserves ~3 lwIP sockets for internal use, so max_open_sockets
+     * must stay <= CONFIG_LWIP_MAX_SOCKETS - 3. With the default 10-socket
+     * lwIP pool that caps us at 7 (HTTPD_DEFAULT_CONFIG). Raising above
+     * that without also raising CONFIG_LWIP_MAX_SOCKETS makes
+     * httpd_start() abort and reboot-loop the device.
+     * Keep LRU purge + longer send timeout so concurrent browser asset
+     * fetches are less likely to stall/reset under the 7-socket cap. */
+    config.lru_purge_enable = true;
+    config.recv_wait_timeout = 10;
+    config.send_wait_timeout = 10;
 
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &config));

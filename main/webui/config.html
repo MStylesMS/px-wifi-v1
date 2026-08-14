@@ -10,7 +10,7 @@
     <div class="bg-grid" aria-hidden="true"></div>
     <header class="topbar wrap">
         <div class="brand">
-            <img src="assets/logo.png" alt="Logo" class="brand-logo" onerror="this.style.display='none'">
+            <img src="assets/logo.png" alt="Logo" class="brand-logo" loading="lazy" decoding="async" onerror="this.style.display='none'">
             <div>
                 <p class="kicker">Paradox Prop Console</p>
                 <h1>Configuration</h1>
@@ -75,6 +75,7 @@
                         <option value="6v-LiFePO4">6V LiFePO4</option>
                         <option value="12v-lead-acid">12V Lead-Acid</option>
                         <option value="12v-LiFePO4">12V LiFePO4</option>
+                        <option value="12v-Li-ion">12V Li-ion</option>
                         <option value="external">External</option>
                         <option value="unknown">Unknown</option>
                     </select>
@@ -104,7 +105,26 @@
 
     <script src="app.js"></script>
     <script>
-        window.PX.pageConfig();
+        (function boot(attempt) {
+            if (window.PX && typeof window.PX.pageConfig === "function") {
+                window.PX.pageConfig();
+                return;
+            }
+            if (attempt >= 6) {
+                var log = document.getElementById("configLog");
+                if (log) {
+                    log.textContent = "Failed to load app.js after retries. Hard-refresh the page.";
+                }
+                return;
+            }
+            var s = document.createElement("script");
+            s.src = "app.js?r=" + Date.now() + "-" + attempt;
+            s.onload = function () { boot(attempt + 1); };
+            s.onerror = function () {
+                setTimeout(function () { boot(attempt + 1); }, 200 * (attempt + 1));
+            };
+            document.head.appendChild(s);
+        })(0);
     </script>
 </body>
 </html>

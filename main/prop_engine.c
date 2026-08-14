@@ -131,11 +131,17 @@ typedef struct {
     battery_point_t points[BATTERY_MAX_POINTS];
 } battery_profile_builtin_t;
 
-/* Lead-acid curves are tuned for light continuous load (ESP32 + half of the
- * status/display LEDs on), not open-circuit resting voltage and not heavy
- * C/5-C/10 discharge. Under that load the pack sags only a little, so the
- * table sits slightly below typical OCV charts at the top and uses a
- * conservative empty point around 5.75 V / 11.50 V. */
+/* Chemistry curves are tuned for light continuous load (ESP32 + half of the
+ * status/display LEDs on), not pure open-circuit resting voltage and not heavy
+ * C/5–C/10 discharge. Under that load the pack sags only a little.
+ *
+ * 12V lead-acid: typical SLA OCV chart, slightly de-rated for light load.
+ *   Full ~12.8 V, ~50% near 12.0 V, cutoff/empty band ~11.0–11.5 V.
+ * 12V LiFePO4 (4S): flat mid-band ~13.0–13.3 V; rest-full ~13.6 V; empty ~10.0 V.
+ *   (The previous table was accidentally a 4S Li-ion curve with empty at 12.2 V,
+ *   which reported 0% and forced deep-sleep while the pack was still >12 V.)
+ * 12V Li-ion / Li-polymer (3S "12V" packs): full 12.6 V, empty 8.5 V per common
+ *   pack manuals (12.0–12.6 V treated as near-full under light load). */
 static const battery_profile_builtin_t s_builtin_profiles[] = {
     {
         .name = "6v-lead-acid",
@@ -157,16 +163,24 @@ static const battery_profile_builtin_t s_builtin_profiles[] = {
         .name = "12v-lead-acid",
         .count = 8,
         .points = {
-            {12600, 100}, {12400, 90}, {12000, 80}, {11600, 60},
-            {11200, 40}, {10800, 20}, {10400, 10}, {10000, 0},
+            {12800, 100}, {12600, 90}, {12400, 80}, {12200, 65},
+            {12000, 50}, {11800, 35}, {11500, 20}, {11000, 0},
         },
     },
     {
         .name = "12v-LiFePO4",
         .count = 8,
         .points = {
-            {14600, 100}, {14200, 96}, {13800, 88}, {13400, 70},
-            {13100, 52}, {12800, 30}, {12500, 12}, {12200, 0},
+            {13600, 100}, {13350, 90}, {13200, 70}, {13050, 50},
+            {12900, 30}, {12600, 15}, {12000, 5}, {10000, 0},
+        },
+    },
+    {
+        .name = "12v-Li-ion",
+        .count = 8,
+        .points = {
+            {12600, 100}, {12400, 95}, {12000, 90}, {11600, 75},
+            {11200, 60}, {10500, 40}, {9600, 20}, {8500, 0},
         },
     },
     {
@@ -214,6 +228,10 @@ typedef struct {
     int64_t battery_cutoff_since_ms;
     battery_point_t battery_points[BATTERY_MAX_POINTS];
     int battery_point_count;
+    /* True only when batteryPoints was explicitly set (API/config). Builtin
+     * profile selections keep this false so firmware curve updates take
+     * effect even if an older SPIFFS copy still has stale point tables. */
+    bool battery_points_custom;
     int64_t battery_low_warning_last_ms;
     prop_event_t event_queue[PROP_EVENT_QUEUE_LEN];
     int event_head;
@@ -944,6 +962,7 @@ static void set_default_battery_config(void)
     s_ctx.battery_adc_at_0v = 0;
     s_ctx.battery_adc_at_15v = BATTERY_ADC_MAX_VALUE;
     s_ctx.battery_adc_raw = 1420;
+    s_ctx.battery_points_custom = false;
 
     load_profile_points(profile);
     s_ctx.battery_voltage_mv = 5200;
@@ -1321,6 +1340,7 @@ static esp_err_t save_battery_file(void)
             "  \"adcAt0V\": %d,\n"
             "  \"adcAt15V\": %d,\n"
             "  \"simVoltageMv\": %d,\n"
+            "  \"pointsCustom\": %s,\n"
             "  \"points\": \"%s\"\n"
             "}\n",
             s_ctx.battery_profile,
@@ -1330,6 +1350,7 @@ static esp_err_t save_battery_file(void)
             s_ctx.battery_adc_at_0v,
             s_ctx.battery_adc_at_15v,
             s_ctx.battery_voltage_mv,
+            s_ctx.battery_points_custom ? "true" : "false",
             points_csv);
 
     if (written < 0) {
@@ -1516,6 +1537,7 @@ static void apply_config_json_unlocked(const char *json)
         if (profile) {
             copy_bounded(s_ctx.battery_profile, sizeof(s_ctx.battery_profile), s_val);
             load_profile_points(profile);
+            s_ctx.battery_points_custom = false;
         }
     }
 
@@ -1545,6 +1567,7 @@ static void apply_config_json_unlocked(const char *json)
             for (i = 0; i < point_count; ++i) {
                 s_ctx.battery_points[i] = pts[i];
             }
+            s_ctx.battery_points_custom = true;
         }
     }
 
@@ -1660,6 +1683,7 @@ static void load_battery_file_if_present(void)
             if (profile) {
                 copy_bounded(s_ctx.battery_profile, sizeof(s_ctx.battery_profile), s_val);
                 load_profile_points(profile);
+                s_ctx.battery_points_custom = false;
             }
         }
 
@@ -1689,14 +1713,24 @@ static void load_battery_file_if_present(void)
             s_ctx.battery_adc_raw = battery_adc_raw_from_voltage_mv(s_ctx.battery_voltage_mv);
         }
 
-        if (json_extract_string(buf, "points", s_val, sizeof(s_val))) {
-            battery_point_t pts[BATTERY_MAX_POINTS];
-            int point_count = 0;
-            if (parse_points_csv(s_val, pts, &point_count)) {
-                int i;
-                s_ctx.battery_point_count = point_count;
-                for (i = 0; i < point_count; ++i) {
-                    s_ctx.battery_points[i] = pts[i];
+        /* Only honor persisted point tables when they were explicitly saved as
+         * a custom override. Older battery_profile.json files always stored a
+         * points snapshot of the then-current builtin; re-applying that would
+         * pin devices to stale curves across firmware upgrades. */
+        {
+            bool points_custom = false;
+            bool has_points_custom = json_extract_bool(buf, "pointsCustom", &points_custom);
+            if (has_points_custom && points_custom &&
+                json_extract_string(buf, "points", s_val, sizeof(s_val))) {
+                battery_point_t pts[BATTERY_MAX_POINTS];
+                int point_count = 0;
+                if (parse_points_csv(s_val, pts, &point_count)) {
+                    int i;
+                    s_ctx.battery_point_count = point_count;
+                    for (i = 0; i < point_count; ++i) {
+                        s_ctx.battery_points[i] = pts[i];
+                    }
+                    s_ctx.battery_points_custom = true;
                 }
             }
         }

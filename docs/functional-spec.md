@@ -656,6 +656,7 @@ Required initial profiles:
 - `6v-LiFePO4`
 - `12v-lead-acid`
 - `12v-LiFePO4`
+- `12v-Li-ion`
 - `external`
 - `unknown`
 

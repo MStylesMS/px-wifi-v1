@@ -37,13 +37,32 @@
         return path.startsWith("/") ? path.slice(1) : path;
     }
 
+    /* Build the request URL for an API path.
+     *
+     * When pages are served over http(s), resolve against document.baseURI so
+     * reverse-proxy injected <base href="/props/<label>/"> still works, while
+     * direct device access (http://suitcase.local/index.html) resolves to
+     * http://suitcase.local/api/... rather than a page-relative dead end.
+     * file:// / demo mode keeps using the explicit API base. */
+    function resolveApiUrl(path) {
+        const rel = normalizeApiPath(path);
+        if (!isServedOverHttp()) {
+            return getApiBase().replace(/\/$/, "") + "/" + rel;
+        }
+        try {
+            const base = document.baseURI || window.location.href;
+            return new URL(rel, base).href;
+        } catch {
+            return "/" + rel;
+        }
+    }
+
     async function api(path, options) {
         if (getDemoMode()) {
             return mockResponse(path, options);
         }
 
-        const rel = normalizeApiPath(path);
-        const requestUrl = isServedOverHttp() ? rel : (getApiBase().replace(/\/$/, "") + "/" + rel);
+        const requestUrl = resolveApiUrl(path);
         const res = await fetch(requestUrl, options);
         const rawText = await res.text();
         let data = null;

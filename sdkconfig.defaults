@@ -9,3 +9,5 @@ CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 # locals (connection_cfg_t snapshots, wifi_config_t, etc.), causing a boot
 # loop. 8192 gives a safe margin.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# httpd max_open_sockets=12 needs LWIP sockets >= open + ~3 reserved.
+CONFIG_LWIP_MAX_SOCKETS=16

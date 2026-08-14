@@ -273,7 +273,15 @@ curl -X POST http://<device-ip>/api/config \
 curl -X POST http://<device-ip>/api/config/save
 ```
 
-Valid builtin profiles: `6v-lead-acid`, `6v-LiFePO4`, `12v-lead-acid`, `12v-LiFePO4`, `external`, `unknown`
+Valid builtin profiles: `6v-lead-acid`, `6v-LiFePO4`, `12v-lead-acid`, `12v-LiFePO4`, `12v-Li-ion`, `external`, `unknown`
+
+### Builtin 12V curves (firmware tables)
+
+| Profile | Full (100%) | Notes | Empty (0%) |
+|---------|-------------|-------|------------|
+| `12v-lead-acid` | 12.80 V | Typical SLA under light load; ~50% near 12.0 V | 11.00 V |
+| `12v-LiFePO4` | 13.60 V | Flat mid-band ~13.0–13.3 V (4S pack) | 10.00 V |
+| `12v-Li-ion` | 12.60 V | 3S Li-ion/Li-po "12V" packs; 12.0–12.6 V near full | 8.50 V |
 
 ---
 

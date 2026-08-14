@@ -7,6 +7,48 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ## [Unreleased]
 
+## [0.39] - 2026-08-14
+
+### Fixed
+
+- Live/Config/Connect pages could render HTML/CSS but show no live data when
+  the browser failed to finish downloading `app.js` (`net::ERR_CONNECTION_RESET`).
+  That left `window.PX` undefined, so state polling and Quick Actions never
+  started (action log could show a later HTTP 404 from a dead relative URI).
+  Static assets are now sent in 2KB chunks, HTTP send/recv timeouts are longer
+  with LRU socket purge enabled, `app.js`/`styles.css` allow short browser
+  caching, the brand logo loads lazily, and each page bootstraps with a short
+  `app.js` reload retry if the first script load fails.
+- API `fetch` URLs now resolve via `document.baseURI` so reverse-proxy
+  `<base href>` and direct device access both hit `/api/...` correctly.
+- Do not raise `httpd_config.max_open_sockets` above
+  `CONFIG_LWIP_MAX_SOCKETS - 3` unless lwIP sockets are raised in the same
+  build; an earlier attempt at 12 open sockets with the default 10-socket
+  lwIP pool caused `httpd_start()` to abort and reboot-loop.
+
+## [0.38] - 2026-08-14
+
+### Added
+
+- Builtin battery profile `12v-Li-ion` for 3S lithium-ion / Li-po "12V" packs
+  (full 12.6 V, empty 8.5 V per typical pack manuals; 12.0–12.6 V treated as
+  near-full under light prop load).
+
+### Fixed
+
+- `12v-LiFePO4` curve was accidentally a 4S Li-ion table (empty at 12.2 V),
+  so packs still above 12 V reported 0% and hit the low-battery deep-sleep
+  cutoff. Replaced with a real 4S LiFePO4 light-load curve (full ~13.6 V,
+  flat mid-band ~13.0–13.3 V, empty 10.0 V).
+- `12v-lead-acid` retuned to a typical SLA light-load chart (full 12.8 V,
+  ~50% near 12.0 V, empty 11.0 V) instead of a simple doubled 6 V table that
+  emptied at 10.0 V.
+- Loading `battery_profile.json` no longer re-applies a stale points snapshot
+  over a builtin profile on every boot. Persisted `points` are used only when
+  `pointsCustom` is true (set when `batteryPoints` is explicitly configured).
+  Selecting a builtin profile clears the custom-points flag so firmware curve
+  updates take effect after OTA/flash without wiping SPIFFS.
+
 ## [0.37] - 2026-07-23
 
 ### Added
