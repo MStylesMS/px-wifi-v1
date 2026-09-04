@@ -121,11 +121,27 @@ static const char *wakeup_cause_name(esp_sleep_wakeup_cause_t cause)
 
 static void log_boot_wakeup_info(void)
 {
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    uint32_t causes = esp_sleep_get_wakeup_causes();
+    esp_sleep_wakeup_cause_t cause = ESP_SLEEP_WAKEUP_UNDEFINED;
 
-    ESP_LOGI(TAG, "Wakeup cause: %s (%d)", wakeup_cause_name(cause), (int)cause);
+    if (causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
+        cause = ESP_SLEEP_WAKEUP_EXT1;
+    } else if (causes & BIT(ESP_SLEEP_WAKEUP_TIMER)) {
+        cause = ESP_SLEEP_WAKEUP_TIMER;
+    } else if (causes & BIT(ESP_SLEEP_WAKEUP_GPIO)) {
+        cause = ESP_SLEEP_WAKEUP_GPIO;
+    } else if (causes != 0) {
+        for (int i = 0; i < 32; i++) {
+            if (causes & BIT(i)) {
+                cause = (esp_sleep_wakeup_cause_t)i;
+                break;
+            }
+        }
+    }
 
-    if (cause == ESP_SLEEP_WAKEUP_EXT1) {
+    ESP_LOGI(TAG, "Wakeup cause: %s (%d) mask=0x%lx", wakeup_cause_name(cause), (int)cause, (unsigned long)causes);
+
+    if (causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
         uint64_t ext1_mask = esp_sleep_get_ext1_wakeup_status();
         bool wake_gpio_triggered = (ext1_mask & (1ULL << DEEP_SLEEP_WAKE_GPIO)) != 0;
 

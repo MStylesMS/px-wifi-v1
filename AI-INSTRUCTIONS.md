@@ -2,6 +2,10 @@
 
 ESP32 Wi-Fi smart-prop firmware for Paradox escape rooms.
 
+Target **ESP-IDF 6.0.x** (same pin as `../px-components`). Admin UI chrome:
+[docs/console-chrome.md](docs/console-chrome.md). Local preview without flash:
+`scripts/serve_webui.ps1` → `http://127.0.0.1:8090/index.html`.
+
 ## MQTT topic contract
 
 | Topic | When | Default | Notes |

@@ -7,6 +7,25 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ## [Unreleased]
 
+### Fixed
+
+- Native `<select>` dropdowns: light fill and dark type (`#07101f` on `#e8f0ff`)
+  so Windows option lists are readable on Signal Glass pages.
+
+## [0.40] - 2026-09-02
+
+### Changed
+
+- Target **ESP-IDF 6.x** (`>=6.0.0`) with px-components 0.83. CMake no longer
+  requires in-tree `mqtt`, `json`, or the legacy `driver` umbrella; GPIO / I2C /
+  LEDC use `esp_driver_*`. Deep-sleep boot log uses `esp_sleep_get_wakeup_causes()`.
+- Prop console chrome: **Signal Glass** (dark navy stage, lighter navy glass
+  panes, green accent). Samples for the other three palettes stay in
+  `main/webui/theme-samples.html`. Page contract in `docs/console-chrome.md`.
+- Local UI iteration: `scripts/serve_webui.ps1` (port **8090**; 8080 is often
+  excluded on Windows) plus automatic demo mocks on localhost (`?demo=1` /
+  `?demo=0` override).
+
 ## [0.39] - 2026-08-14
 
 ### Fixed

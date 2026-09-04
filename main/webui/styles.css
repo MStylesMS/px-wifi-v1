@@ -1,33 +1,52 @@
 :root {
-    --ink: #19202d;
-    --muted: #5b6779;
-    --paper: #f4f2ee;
-    --panel: rgba(255, 255, 255, 0.78);
-    --line: rgba(25, 32, 45, 0.14);
-    --accent: #d94f2b;
-    --accent-soft: #f5b08d;
-    --ok: #2f8f74;
-    --warn: #b57500;
-    --bad: #b23a3a;
-    --shadow: 0 20px 40px rgba(20, 28, 43, 0.12);
+    /* Signal Glass: navy stage, lighter navy panes, green accent (logo family). */
+    --blue: #1a3a6e;
+    --blue-mid: #2a56a0;
+    --blue-deep: #07101f;
+    --green: #00a651;
+    --green-bright: #00c45c;
+    --green-deep: #00763a;
+    --ink: #e8f0ff;
+    --muted: #8aa6c8;
+    --paper: #07101f;
+    --surface: #0b1c3c;
+    --panel: linear-gradient(145deg, rgba(42, 86, 160, 0.72) 0%, rgba(14, 36, 72, 0.88) 100%);
+    --metric: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(8, 20, 44, 0.35));
+    --line: rgba(0, 196, 92, 0.28);
+    --grid: rgba(0, 166, 81, 0.10);
+    --accent: var(--green-bright);
+    --accent-soft: #2fd67a;
+    --ok: var(--green-bright);
+    --ok-ink: #03140a;
+    --warn: #f0a92a;
+    --bad: #ef4444;
+    --danger: var(--bad);
+    --shadow: 0 16px 32px rgba(0, 20, 10, 0.28);
+    --cta: linear-gradient(135deg, var(--green-bright), var(--green-deep));
+    --tab-bg: rgba(255, 255, 255, 0.05);
 }
 
 * {
     box-sizing: border-box;
 }
 
+html {
+    color-scheme: dark;
+}
+
 body {
     margin: 0;
     color: var(--ink);
-    font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
-    background: radial-gradient(circle at 5% 5%, #ffd8bf, transparent 30%),
-        radial-gradient(circle at 100% 0%, #c4efe5, transparent 35%),
-        var(--paper);
+    font-family: "Segoe UI", "Avenir Next", system-ui, sans-serif;
+    background:
+        radial-gradient(circle at 100% 0%, rgba(0, 166, 81, 0.22), transparent 34%),
+        radial-gradient(circle at 0% 100%, rgba(26, 58, 110, 0.55), transparent 42%),
+        linear-gradient(145deg, #0b1c3c 0%, #07101f 100%);
     min-height: 100vh;
 }
 
 h1, h2, h3 {
-    font-family: "Bricolage Grotesque", "Trebuchet MS", sans-serif;
+    font-family: "Segoe UI", "Trebuchet MS", system-ui, sans-serif;
     margin: 0;
 }
 
@@ -35,9 +54,9 @@ h1, h2, h3 {
     position: fixed;
     inset: 0;
     pointer-events: none;
-    opacity: 0.22;
-    background-image: linear-gradient(var(--line) 1px, transparent 1px),
-        linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    opacity: 1;
+    background-image: linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px);
     background-size: 28px 28px;
 }
 
@@ -74,7 +93,7 @@ h1, h2, h3 {
     border-radius: 999px;
     border: 1px solid var(--line);
     padding: 0.3rem 0.7rem;
-    background: rgba(255, 255, 255, 0.82);
+    background: var(--metric);
 }
 
 .battery-good {
@@ -117,7 +136,7 @@ h1, h2, h3 {
     height: 44px;
     object-fit: contain;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.7);
+    background: linear-gradient(180deg, rgba(26, 58, 110, 0.8), rgba(8, 16, 32, 0.9));
     border: 1px solid var(--line);
 }
 
@@ -138,15 +157,15 @@ h1, h2, h3 {
     text-decoration: none;
     color: var(--ink);
     border: 1px solid var(--line);
-    background: rgba(255, 255, 255, 0.7);
+    background: var(--tab-bg);
     padding: 0.5rem 0.85rem;
     border-radius: 999px;
     font-weight: 600;
 }
 
 .tab.active {
-    background: var(--ink);
-    color: #fff;
+    background: var(--cta);
+    color: var(--ok-ink);
 }
 
 .layout {
@@ -165,7 +184,10 @@ h1, h2, h3 {
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 18px;
-    box-shadow: var(--shadow);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.18),
+        0 0 0 1px rgba(0, 196, 92, 0.12),
+        var(--shadow);
     padding: 1rem;
     overflow: hidden;
     animation: rise 420ms ease both;
@@ -192,45 +214,45 @@ h1, h2, h3 {
 .badge {
     border-radius: 999px;
     padding: 0.35rem 0.7rem;
-    background: #fff;
+    background: var(--metric);
     border: 1px solid var(--line);
     text-transform: capitalize;
 }
 
 .badge.state-ready {
-    background: #2f8f74;
-    color: #fff;
-    border-color: rgba(0, 0, 0, 0.1);
+    background: var(--cta);
+    color: var(--ok-ink);
+    border-color: transparent;
 }
 
 .badge.state-not-ready {
-    background: #bf7f00;
-    color: #fff;
-    border-color: rgba(0, 0, 0, 0.1);
+    background: linear-gradient(160deg, #f0a92a, #b57500);
+    color: #1a1408;
+    border-color: transparent;
 }
 
 .badge.state-running {
-    background: #ffffff;
-    color: #19202d;
-    border-color: rgba(25, 32, 45, 0.2);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(8, 20, 44, 0.4));
+    color: var(--ink);
+    border-color: rgba(232, 240, 255, 0.2);
 }
 
 .badge.state-paused {
-    background: #d1a100;
-    color: #1a1a1a;
-    border-color: rgba(0, 0, 0, 0.1);
+    background: linear-gradient(160deg, #d6b33e, #bd9700);
+    color: #1a1408;
+    border-color: transparent;
 }
 
 .badge.state-solved {
-    background: #1a6b55;
-    color: #fff;
-    border-color: rgba(0, 0, 0, 0.1);
+    background: linear-gradient(135deg, var(--green), var(--green-deep));
+    color: var(--ok-ink);
+    border-color: transparent;
 }
 
 .badge.state-failed {
-    background: #8e2323;
+    background: linear-gradient(160deg, #ef4444, #9f1f1f);
     color: #fff;
-    border-color: rgba(0, 0, 0, 0.1);
+    border-color: transparent;
 }
 
 .metrics {
@@ -240,7 +262,7 @@ h1, h2, h3 {
 }
 
 .metric {
-    background: rgba(255, 255, 255, 0.7);
+    background: var(--metric);
     border: 1px solid var(--line);
     border-radius: 12px;
     padding: 0.8rem;
@@ -284,7 +306,7 @@ h1, h2, h3 {
 
 .btn {
     border: 1px solid transparent;
-    background: linear-gradient(160deg, var(--accent), #de6a46);
+    background: linear-gradient(160deg, rgba(36, 72, 140, 0.9), rgba(12, 28, 56, 0.95));
     color: #fff;
     font-weight: 700;
     border-radius: 10px;
@@ -302,7 +324,7 @@ h1, h2, h3 {
 
 .btn-ghost {
     color: var(--ink);
-    background: rgba(255, 255, 255, 0.75);
+    background: var(--tab-bg);
     border-color: var(--line);
 }
 
@@ -315,11 +337,13 @@ h1, h2, h3 {
 }
 
 .btn-start {
-    background: linear-gradient(160deg, #5dbd7e, #3da362);
+    background: var(--cta);
+    color: var(--ok-ink);
 }
 
 .btn-resume {
-    background: linear-gradient(160deg, #5dbd7e, #3da362);
+    background: var(--cta);
+    color: var(--ok-ink);
 }
 
 .btn-pause {
@@ -328,7 +352,8 @@ h1, h2, h3 {
 }
 
 .btn-solve {
-    background: linear-gradient(160deg, #2f8f74, #1a6b55);
+    background: var(--cta);
+    color: var(--ok-ink);
 }
 
 .input-indicators {
@@ -365,27 +390,27 @@ h1, h2, h3 {
 }
 
 #gameStatePanel.state-ready {
-    background: linear-gradient(180deg, rgba(47, 143, 116, 0.24), rgba(255, 255, 255, 0.78));
+    background: linear-gradient(180deg, rgba(0, 196, 92, 0.28), rgba(14, 36, 72, 0.78));
 }
 
 #gameStatePanel.state-not-ready {
-    background: linear-gradient(180deg, rgba(191, 127, 0, 0.26), rgba(255, 255, 255, 0.78));
+    background: linear-gradient(180deg, rgba(240, 169, 42, 0.28), rgba(14, 36, 72, 0.78));
 }
 
 #gameStatePanel.state-running {
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.78));
+    background: linear-gradient(180deg, rgba(42, 86, 160, 0.45), rgba(14, 36, 72, 0.78));
 }
 
 #gameStatePanel.state-paused {
-    background: linear-gradient(180deg, rgba(214, 179, 62, 0.28), rgba(255, 255, 255, 0.78));
+    background: linear-gradient(180deg, rgba(214, 179, 62, 0.28), rgba(14, 36, 72, 0.78));
 }
 
 #gameStatePanel.state-solved {
-    background: linear-gradient(180deg, rgba(26, 107, 85, 0.38), rgba(255, 255, 255, 0.78));
+    background: linear-gradient(180deg, rgba(0, 166, 81, 0.38), rgba(14, 36, 72, 0.78));
 }
 
 #gameStatePanel.state-failed {
-    background: linear-gradient(180deg, rgba(142, 35, 35, 0.38), rgba(255, 255, 255, 0.78));
+    background: linear-gradient(180deg, rgba(239, 68, 68, 0.38), rgba(14, 36, 72, 0.78));
 }
 
 .wifi-status {
@@ -462,9 +487,31 @@ textarea {
     border: 1px solid var(--line);
     border-radius: 10px;
     padding: 0.58rem 0.65rem;
-    background: rgba(255, 255, 255, 0.86);
+    background: var(--metric);
     color: var(--ink);
     font: inherit;
+}
+
+/* Native <select> popups on Windows keep a light list and often ignore
+ * `color` on the closed field. Force a light field, dark type, and a CSS
+ * chevron so every dropdown is readable. */
+select {
+    color-scheme: light;
+    appearance: none;
+    -webkit-appearance: none;
+    color: #07101f;
+    -webkit-text-fill-color: #07101f;
+    background-color: #e8f0ff;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%2307101f' d='M1.2 1.4L6 6.2l4.8-4.8 1.2 1.2L6 8.6 0 2.6z'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.7rem center;
+    background-size: 12px 8px;
+    padding-right: 2rem;
+}
+
+select option {
+    color: #07101f;
+    background: #ffffff;
 }
 
 .inline-form input {
@@ -519,7 +566,7 @@ textarea {
     padding: 0.55rem 0.7rem;
     border: 1px solid var(--line);
     border-radius: 10px;
-    background: rgba(255, 255, 255, 0.65);
+    background: var(--metric);
 }
 
 .detail-item span {
@@ -542,7 +589,7 @@ textarea {
     border: 1px solid var(--line);
     border-radius: 8px;
     padding: 0.45rem 0.55rem;
-    background: rgba(255, 255, 255, 0.68);
+    background: var(--metric);
     color: var(--muted);
     font-size: 0.85rem;
     white-space: nowrap;
@@ -567,7 +614,7 @@ textarea {
     border: 1px solid var(--line);
     border-radius: 10px;
     padding: 0.55rem 0.65rem;
-    background: rgba(255, 255, 255, 0.72);
+    background: var(--metric);
     cursor: pointer;
 }
 
@@ -605,7 +652,7 @@ textarea {
     overflow: auto;
     border-radius: 10px;
     border: 1px solid var(--line);
-    background: #111722;
+    background: linear-gradient(180deg, #040814, #07101f);
     color: #d5deee;
     padding: 0.8rem;
     white-space: pre-wrap;
@@ -625,7 +672,7 @@ textarea {
     inset: -40% auto auto -40%;
     width: 180px;
     height: 180px;
-    background: radial-gradient(circle, rgba(47, 143, 116, 0.24), transparent 68%);
+    background: radial-gradient(circle, rgba(0, 196, 92, 0.22), transparent 68%);
     animation: drift 5s ease-in-out infinite;
 }
 

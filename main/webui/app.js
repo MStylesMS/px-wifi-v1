@@ -21,7 +21,34 @@
         return localStorage.getItem(KEY_BASE) || "http://192.168.4.1";
     }
 
+    function queryDemoOverride() {
+        try {
+            const q = new URLSearchParams(window.location.search).get("demo");
+            if (q === "1" || q === "true") {
+                return true;
+            }
+            if (q === "0" || q === "false") {
+                return false;
+            }
+        } catch {
+            /* ignore */
+        }
+        return null;
+    }
+
+    function isLocalPreviewHost() {
+        const h = window.location.hostname;
+        return h === "127.0.0.1" || h === "localhost" || h === "[::1]";
+    }
+
     function getDemoMode() {
+        const q = queryDemoOverride();
+        if (q !== null) {
+            return q;
+        }
+        if (isLocalPreviewHost()) {
+            return true;
+        }
         return localStorage.getItem(KEY_DEMO) === "1";
     }
 
@@ -244,9 +271,9 @@
     }
 
     const BATTERY_COLOR_HEX = {
-        good: "#2f8f74",
-        warn: "#b57500",
-        bad: "#b23a3a"
+        good: "#00c45c",
+        warn: "#f0a92a",
+        bad: "#ef4444"
     };
 
     function batteryTier(percent) {
@@ -318,7 +345,7 @@
 
     function tablerWifiSvg(level) {
         const l = Math.max(1, Math.min(4, Number(level || 1)));
-        const color = l >= 3 ? "#2f8f74" : l === 2 ? "#b57500" : "#b23a3a";
+        const color = l >= 3 ? "#00c45c" : l === 2 ? "#f0a92a" : "#ef4444";
         const op1 = l >= 1 ? 1 : 0.25;
         const op2 = l >= 2 ? 1 : 0.25;
         const op3 = l >= 3 ? 1 : 0.25;

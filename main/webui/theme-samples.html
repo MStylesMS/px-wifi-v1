@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PX-WiFi-V1 — theme samples</title>
+    <style>
+        :root {
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            color: #dde6f7;
+            background: #050814;
+        }
+
+        .page-intro {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 1.25rem 1.25rem 0.4rem;
+        }
+
+        .page-intro h1 {
+            margin: 0 0 0.35rem;
+            font-size: 1.35rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+
+        .page-intro p {
+            margin: 0;
+            color: #7a93b8;
+            font-size: 0.92rem;
+            max-width: 70ch;
+            line-height: 1.45;
+        }
+
+        .gallery {
+            display: grid;
+            gap: 1.25rem;
+            padding: 1rem 1.25rem 2rem;
+            max-width: 1280px;
+            margin: 0 auto;
+        }
+
+        @media (min-width: 1100px) {
+            .gallery { grid-template-columns: 1fr 1fr; }
+        }
+
+        .variant {
+            border-radius: 18px;
+            overflow: hidden;
+            border: 1px solid rgba(120, 160, 220, 0.18);
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+        }
+
+        .variant-meta {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.75rem;
+            align-items: baseline;
+            padding: 0.7rem 0.9rem;
+            background: #0b1020;
+            border-bottom: 1px solid rgba(120, 160, 220, 0.12);
+        }
+
+        .variant-meta h2 {
+            margin: 0;
+            font-size: 0.95rem;
+            font-weight: 650;
+        }
+
+        .variant-meta p {
+            margin: 0.15rem 0 0;
+            color: #7a93b8;
+            font-size: 0.75rem;
+        }
+
+        .swatches {
+            display: flex;
+            gap: 0.35rem;
+            flex-shrink: 0;
+        }
+
+        .swatch {
+            width: 18px;
+            height: 18px;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.25);
+        }
+
+        /* Shared chrome inside each mock */
+        .mock {
+            min-height: 430px;
+            padding: 0.85rem 0.9rem 1rem;
+            color: var(--ink);
+            background: var(--page-bg);
+            position: relative;
+        }
+
+        .mock::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            background-image:
+                linear-gradient(var(--grid) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+            background-size: 26px 26px;
+            opacity: var(--grid-opacity, 0.18);
+        }
+
+        .mock > * { position: relative; }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.7rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .brand-logo {
+            width: 38px;
+            height: 38px;
+            object-fit: contain;
+            border-radius: 8px;
+            background: var(--logo-well);
+            border: 1px solid var(--line);
+            padding: 3px;
+        }
+
+        .kicker {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.68rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+
+        .brand h3 {
+            margin: 0;
+            font-size: 0.95rem;
+            font-weight: 650;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 0.35rem;
+        }
+
+        .tab {
+            text-decoration: none;
+            color: var(--ink);
+            border: 1px solid var(--line);
+            background: var(--tab-bg);
+            padding: 0.32rem 0.7rem;
+            border-radius: 999px;
+            font-weight: 650;
+            font-size: 0.78rem;
+        }
+
+        .tab.active {
+            background: var(--tab-active);
+            color: var(--tab-active-ink);
+            border-color: transparent;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 1.15fr 0.85fr;
+            gap: 0.7rem;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            box-shadow: var(--shadow);
+            padding: 0.75rem;
+        }
+
+        .panel-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.65rem;
+        }
+
+        .panel-head h4 {
+            margin: 0;
+            font-size: 0.88rem;
+        }
+
+        .badge {
+            border-radius: 999px;
+            padding: 0.2rem 0.55rem;
+            font-size: 0.72rem;
+            font-weight: 700;
+            background: var(--ok);
+            color: var(--ok-ink);
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.45rem;
+        }
+
+        .metric {
+            background: var(--metric);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 0.5rem 0.55rem;
+        }
+
+        .metric p {
+            margin: 0 0 0.2rem;
+            color: var(--muted);
+            font-size: 0.7rem;
+        }
+
+        .metric strong {
+            font-size: 1.05rem;
+        }
+
+        .btn-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.4rem;
+        }
+
+        .btn {
+            border: 1px solid transparent;
+            background: var(--btn);
+            color: #fff;
+            font-weight: 700;
+            border-radius: 9px;
+            padding: 0.48rem 0.5rem;
+            font-size: 0.78rem;
+        }
+
+        .btn-ok { background: var(--cta); color: var(--cta-ink); }
+        .btn-warn { background: var(--warn); color: #1a1408; }
+        .btn-pause { background: var(--pause); color: #1a1408; }
+        .btn-bad { background: var(--bad); }
+
+        .hairline {
+            height: 2px;
+            border: 0;
+            margin: 0.55rem 0 0.45rem;
+            background: var(--hairline);
+            border-radius: 99px;
+        }
+
+        /* 1 — Midnight Signal (PxP midnight, logo-navy panes) */
+        .v-midnight {
+            --page-bg:
+                radial-gradient(circle at 8% -10%, rgba(26, 58, 130, 0.55), transparent 42%),
+                radial-gradient(circle at 100% 0%, rgba(0, 166, 81, 0.14), transparent 36%),
+                linear-gradient(160deg, #0a1d44 0%, #04081a 100%);
+            --panel: linear-gradient(180deg, #1a3a78 0%, #0a1830 100%);
+            --metric: linear-gradient(180deg, rgba(36, 72, 140, 0.55), rgba(10, 24, 48, 0.55));
+            --tab-bg: linear-gradient(180deg, rgba(26, 58, 120, 0.35), rgba(8, 18, 40, 0.45));
+            --tab-active: linear-gradient(135deg, #00c45c 0%, #00763a 100%);
+            --tab-active-ink: #04140c;
+            --logo-well: linear-gradient(180deg, #1a3a82, #06122e);
+            --line: rgba(80, 140, 230, 0.22);
+            --grid: rgba(80, 140, 230, 0.16);
+            --ink: #dde6f7;
+            --muted: #7ea0c8;
+            --ok: linear-gradient(135deg, #00c45c, #00763a);
+            --ok-ink: #04140c;
+            --btn: linear-gradient(160deg, #1a3a78, #0a1830);
+            --cta: linear-gradient(135deg, #00c45c, #00763a);
+            --cta-ink: #04140c;
+            --warn: linear-gradient(160deg, #f0a92a, #b57500);
+            --pause: linear-gradient(160deg, #d6b33e, #bd9700);
+            --bad: linear-gradient(160deg, #ef4444, #9f1f1f);
+            --hairline: linear-gradient(90deg, transparent, #00c45c, transparent);
+            --shadow: 0 16px 28px rgba(0, 0, 0, 0.35);
+        }
+
+        /* 2 — Logo Navy (field matches attached blue mark) */
+        .v-logo-navy {
+            --page-bg:
+                radial-gradient(circle at 12% 0%, rgba(42, 92, 168, 0.45), transparent 46%),
+                linear-gradient(165deg, #154a86 0%, #0c2f5c 48%, #081e3c 100%);
+            --panel: linear-gradient(165deg, #3a72c0 0%, #1e4d8c 58%, #163a6e 100%);
+            --metric: linear-gradient(180deg, rgba(90, 140, 210, 0.38), rgba(16, 48, 96, 0.5));
+            --tab-bg: linear-gradient(180deg, rgba(70, 120, 190, 0.35), rgba(16, 48, 96, 0.4));
+            --tab-active: linear-gradient(135deg, #1e5aa8, #0c3870);
+            --tab-active-ink: #e8f1ff;
+            --logo-well: linear-gradient(180deg, #2a62b0, #0c3870);
+            --line: rgba(170, 205, 255, 0.28);
+            --grid: rgba(170, 205, 255, 0.14);
+            --ink: #f2f7ff;
+            --muted: #b7cce8;
+            --ok: linear-gradient(135deg, #2fd67a, #00a651);
+            --ok-ink: #042010;
+            --btn: linear-gradient(160deg, #2a62b0, #123a72);
+            --cta: linear-gradient(135deg, #2fd67a, #00a651);
+            --cta-ink: #042010;
+            --warn: linear-gradient(160deg, #f0a92a, #b57500);
+            --pause: linear-gradient(160deg, #d6b33e, #bd9700);
+            --bad: linear-gradient(160deg, #ef4444, #9f1f1f);
+            --hairline: linear-gradient(90deg, #3a72c0, #00a651, #3a72c0);
+            --shadow: 0 16px 28px rgba(6, 20, 48, 0.4);
+        }
+
+        /* 3 — Deep Well (darker stage, lifted lighter panes) */
+        .v-deep-well {
+            --page-bg:
+                radial-gradient(circle at 50% -20%, rgba(30, 74, 140, 0.55), transparent 50%),
+                linear-gradient(180deg, #081428 0%, #040814 100%);
+            --panel: linear-gradient(200deg, #2a5aa8 0%, #163a70 70%, #102848 100%);
+            --metric: linear-gradient(180deg, rgba(70, 120, 190, 0.32), rgba(12, 28, 56, 0.55));
+            --tab-bg: rgba(20, 48, 96, 0.45);
+            --tab-active: linear-gradient(180deg, #2a5aa8, #163a70);
+            --tab-active-ink: #f4f8ff;
+            --logo-well: linear-gradient(180deg, #1a3a6e, #081428);
+            --line: rgba(120, 170, 230, 0.28);
+            --grid: rgba(80, 130, 200, 0.12);
+            --grid-opacity: 0.22;
+            --ink: #e6eefc;
+            --muted: #8eabd0;
+            --ok: linear-gradient(135deg, #00c45c, #00a651);
+            --ok-ink: #03140a;
+            --btn: linear-gradient(160deg, #1a3a6e, #0a1830);
+            --cta: linear-gradient(135deg, #00c45c, #00763a);
+            --cta-ink: #03140a;
+            --warn: linear-gradient(160deg, #f0a92a, #b57500);
+            --pause: linear-gradient(160deg, #d6b33e, #bd9700);
+            --bad: linear-gradient(160deg, #ef4444, #9f1f1f);
+            --hairline: linear-gradient(90deg, transparent 0%, #2a5aa8 30%, #00a651 70%, transparent 100%);
+            --shadow: 0 20px 36px rgba(0, 0, 0, 0.45);
+        }
+
+        /* 4 — Signal Glass (navy glass + green rim light) */
+        .v-signal-glass {
+            --page-bg:
+                radial-gradient(circle at 100% 0%, rgba(0, 166, 81, 0.22), transparent 34%),
+                radial-gradient(circle at 0% 100%, rgba(26, 58, 110, 0.55), transparent 42%),
+                linear-gradient(145deg, #0b1c3c 0%, #07101f 100%);
+            --panel: linear-gradient(145deg, rgba(42, 86, 160, 0.72) 0%, rgba(14, 36, 72, 0.88) 100%);
+            --metric: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(8, 20, 44, 0.35));
+            --tab-bg: rgba(255, 255, 255, 0.05);
+            --tab-active: linear-gradient(135deg, #00c45c, #00763a);
+            --tab-active-ink: #03140a;
+            --logo-well: linear-gradient(180deg, rgba(26, 58, 110, 0.8), rgba(8, 16, 32, 0.9));
+            --line: rgba(0, 196, 92, 0.28);
+            --grid: rgba(0, 166, 81, 0.10);
+            --ink: #e8f0ff;
+            --muted: #8aa6c8;
+            --ok: linear-gradient(135deg, #2fd67a, #00a651);
+            --ok-ink: #03140a;
+            --btn: linear-gradient(160deg, rgba(36, 72, 140, 0.9), rgba(12, 28, 56, 0.95));
+            --cta: linear-gradient(135deg, #00c45c, #00763a);
+            --cta-ink: #03140a;
+            --warn: linear-gradient(160deg, #f0a92a, #b57500);
+            --pause: linear-gradient(160deg, #d6b33e, #bd9700);
+            --bad: linear-gradient(160deg, #ef4444, #9f1f1f);
+            --hairline: linear-gradient(90deg, rgba(42, 86, 160, 0), #00c45c 50%, rgba(42, 86, 160, 0));
+            --shadow: 0 16px 32px rgba(0, 20, 10, 0.28);
+        }
+
+        .v-signal-glass .panel {
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.18),
+                0 0 0 1px rgba(0, 196, 92, 0.12),
+                0 16px 32px rgba(0, 20, 10, 0.28);
+        }
+    </style>
+</head>
+<body>
+    <header class="page-intro">
+        <h1>Prop console — four dark navy samples</h1>
+        <p>
+            Same Live chrome, four palettes. Background stays in the attached navy-logo family;
+            panes are a lighter stop of that hue; green from the attached green logo is accent only
+            (tabs, Ready, Start/Resume/Solve, hairlines). Not wired into firmware yet — pick one
+            and we can retint <code>styles.css</code>.
+        </p>
+    </header>
+
+    <div class="gallery">
+        <article class="variant">
+            <div class="variant-meta">
+                <div>
+                    <h2>1. Midnight Signal</h2>
+                    <p>PxP midnight-paradox: deepest stage, green as signal light.</p>
+                </div>
+                <div class="swatches">
+                    <span class="swatch" style="background:#04081a"></span>
+                    <span class="swatch" style="background:#1a3a78"></span>
+                    <span class="swatch" style="background:#00c45c"></span>
+                </div>
+            </div>
+            <div class="mock v-midnight" data-chrome></div>
+        </article>
+
+        <article class="variant">
+            <div class="variant-meta">
+                <div>
+                    <h2>2. Logo Navy</h2>
+                    <p>Page field closer to the blue mark; panes lift in the same hue.</p>
+                </div>
+                <div class="swatches">
+                    <span class="swatch" style="background:#0c2f5c"></span>
+                    <span class="swatch" style="background:#3a72c0"></span>
+                    <span class="swatch" style="background:#00a651"></span>
+                </div>
+            </div>
+            <div class="mock v-logo-navy" data-chrome></div>
+        </article>
+
+        <article class="variant">
+            <div class="variant-meta">
+                <div>
+                    <h2>3. Deep Well</h2>
+                    <p>Near-black navy stage, clearly lighter mid-navy panes.</p>
+                </div>
+                <div class="swatches">
+                    <span class="swatch" style="background:#040814"></span>
+                    <span class="swatch" style="background:#2a5aa8"></span>
+                    <span class="swatch" style="background:#00a651"></span>
+                </div>
+            </div>
+            <div class="mock v-deep-well" data-chrome></div>
+        </article>
+
+        <article class="variant">
+            <div class="variant-meta">
+                <div>
+                    <h2>4. Signal Glass</h2>
+                    <p>Glass panes, green rim/hairline, green active tab.</p>
+                </div>
+                <div class="swatches">
+                    <span class="swatch" style="background:#07101f"></span>
+                    <span class="swatch" style="background:#2a56a0"></span>
+                    <span class="swatch" style="background:#00c45c"></span>
+                </div>
+            </div>
+            <div class="mock v-signal-glass" data-chrome></div>
+        </article>
+    </div>
+
+    <template id="chrome">
+        <div class="topbar">
+            <div class="brand">
+                <img src="assets/logo.png" alt="" class="brand-logo">
+                <div>
+                    <p class="kicker">Paradox Prop Console</p>
+                    <h3>PX-WiFi-V1 Dashboard</h3>
+                </div>
+            </div>
+            <nav class="tabs">
+                <span class="tab active">Live</span>
+                <span class="tab">Config</span>
+                <span class="tab">Connect</span>
+            </nav>
+        </div>
+        <div class="layout">
+            <section class="panel">
+                <div class="panel-head">
+                    <h4>Game State</h4>
+                    <span class="badge">Ready</span>
+                </div>
+                <div class="metrics">
+                    <div class="metric"><p>Time Remaining</p><strong>60:00</strong></div>
+                    <div class="metric"><p>Input States</p><strong>4/4 Closed</strong></div>
+                    <div class="metric"><p>Battery</p><strong>100%</strong></div>
+                    <div class="metric"><p>Tries Used</p><strong>0 / 3</strong></div>
+                </div>
+            </section>
+            <section class="panel">
+                <div class="panel-head">
+                    <h4>Quick Actions</h4>
+                </div>
+                <div class="btn-grid">
+                    <button class="btn btn-ok" type="button">Start</button>
+                    <button class="btn btn-warn" type="button">Reset</button>
+                    <button class="btn btn-pause" type="button">Pause</button>
+                    <button class="btn btn-ok" type="button">Resume</button>
+                    <button class="btn btn-ok" type="button">Solve</button>
+                    <button class="btn btn-bad" type="button">Fail</button>
+                </div>
+                <hr class="hairline">
+            </section>
+        </div>
+    </template>
+    <script>
+        const tpl = document.getElementById("chrome");
+        document.querySelectorAll("[data-chrome]").forEach((el) => {
+            el.appendChild(tpl.content.cloneNode(true));
+        });
+    </script>
+</body>
+</html>
