@@ -34,6 +34,30 @@ Shared chrome on Live / Config / Connect:
 - Subtle radial/linear CSS gradients only
 - No webfont CDNs, no large raster chrome besides the logo
 - Path-relative assets + `lib_http_proxy` (`X-Forwarded-Prefix`) so Room Controller `/props/<mdns>/` still works
+- **No Bootstrap required.** Prefer lightweight CSS; Bootstrap only if a prop’s
+  form density truly needs it.
+
+## Responsive (required on every prop)
+
+Admin UI must be usable on **phone (~390px)**, **tablet (~768px)**, and desktop.
+Check Live / Config / Connect (and Monitor when present) at those widths before
+shipping. Do not assume desktop-only.
+
+Breakpoints already in `styles.css` (copy forward on new props):
+
+| Breakpoint | Intent |
+|------------|--------|
+| `max-width: 820px` | Tablet / narrow laptop: stack `.layout` **and** `.layout.live-layout` to one column; wrap tabs; status icons on their own row |
+| `max-width: 520px` | Phone: tighter padding, single-column metrics/buttons, prop-specific grids (charges 2×2, valve stations 1-col, etc.) |
+
+Specificity trap: `.layout.live-layout { grid-template-columns: … }` beats a bare
+`.layout` rule inside a media query. Always include `.layout.live-layout` in the
+collapse rule. Tabs must `flex-wrap` so four pills + status icons do not force
+horizontal page scroll.
+
+Prop-specific dense boards (fuse schematic, valve path, patch SVG, dynamite
+charges) get their own narrow rules — keep the chrome breakpoints aligned with
+px-wifi-v1.
 
 ## Debug
 
@@ -65,5 +89,5 @@ Loop:
 
 1. Edit `webui/styles.css` (tokens first) and HTML structure
 2. Hard-refresh the local pages
-3. Check Live, Config, Connect, OTA at desktop and a narrow phone width
+3. Check Live, Config, Connect, OTA at **desktop, tablet (~768), and phone (~390)**
 4. Only then flash a bench unit to confirm `lib_http_proxy` + asset size
