@@ -200,8 +200,9 @@ static esp_err_t load_connection_cfg_nvs(void)
         return ESP_ERR_TIMEOUT;
     }
     err = web_ui_json_load_connection_cfg(WEB_UI_CONFIG_FILE_PATH, &s_conn_cfg);
-    /* SoftAP stays up after STA connect; PSK is the access control. */
-    s_conn_cfg.ap_enabled = true;
+    /* SoftAP starts for recovery; shut down after STA IP unless apEnabled.
+     * Classic ESP32 APSTA tanks TCP; SoftAP recovers on STA drop when false. */
+    s_conn_cfg.ap_enabled = false;
     conn_cfg_unlock();
     return err;
 }
@@ -420,10 +421,13 @@ static esp_err_t apply_connection_fields_from_json(const cJSON *root,
     if (web_ui_json_get_string(root, "uiPassword", value, sizeof(value))) {
         copy_bounded_local(s_conn_cfg.ui_password, sizeof(s_conn_cfg.ui_password), value);
     }
-    /* SoftAP remains enabled after STA connect; PSK is the access control.
-     * Ignore client attempts to disable it so config/connection stay aligned. */
-    s_conn_cfg.ap_enabled = true;
-    svc_wifi_set_ap_enabled(true);
+    {
+        bool ap_enabled = s_conn_cfg.ap_enabled;
+        if (web_ui_json_get_bool(root, "apEnabled", &ap_enabled)) {
+            s_conn_cfg.ap_enabled = ap_enabled;
+        }
+        svc_wifi_set_ap_enabled(s_conn_cfg.ap_enabled);
+    }
 
     ESP_LOGI(TAG,
              "Connection config updated (wifi ssid='%s', mqtt host='%s:%d', ap_enabled=%d)",
@@ -2071,8 +2075,8 @@ esp_err_t web_ui_start(void)
     }
 
     conn_cfg_snapshot(&cfg_snap);
-    /* SoftAP stays up after STA connect; PSK is the access control. */
-    cfg_snap.ap_enabled = true;
+    /* SoftAP starts for recovery; if ap_enabled is false it shuts down
+     * after STA gets an IP (same policy as fuse/valve/patch/dynamite). */
 
     {
         uint8_t mac[6] = {0};
@@ -2085,10 +2089,11 @@ esp_err_t web_ui_start(void)
         copy_bounded_local(ap_password_buf, sizeof(ap_password_buf), cfg_snap.ap_password);
         wifi_cfg.ap_ssid = ap_ssid;
         wifi_cfg.ap_password = ap_password_buf;
-        wifi_cfg.ap_enabled = true;
+        wifi_cfg.ap_enabled = cfg_snap.ap_enabled;
+        wifi_cfg.ap_shutdown_delay_ms = 3000;
 
         ESP_ERROR_CHECK(svc_wifi_init(&wifi_cfg));
-        svc_wifi_set_ap_enabled(true);
+        svc_wifi_set_ap_enabled(cfg_snap.ap_enabled);
     }
 
     svc_wifi_set_sta_connected_cb(wifi_on_sta_connected, NULL);

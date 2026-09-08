@@ -38,7 +38,7 @@ typedef struct {
     .network_name = "", \
     .ap_password = "", \
     .ui_password = "", \
-    .ap_enabled = true, \
+    .ap_enabled = false, \
 }
 
 cJSON *web_ui_json_parse(const char *json);

@@ -8,6 +8,10 @@ look and responsive breakpoints** (phone / tablet / desktop) for all future
 `px-*-v1` props. Local preview without flash:
 `scripts/serve_webui.ps1` → `http://127.0.0.1:8090/index.html`.
 
+SoftAP (`Paradox-PXWiFiV1-XXXX`): starts for recovery; **off by default after STA
+connects** (`apEnabled=false`, same as fuse/valve/patch/dynamite). Check Connect
+“Keep AP active while connected to WiFi” to leave it on.
+
 ## MQTT topic contract
 
 | Topic | When | Default | Notes |

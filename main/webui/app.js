@@ -238,7 +238,7 @@
                 apSsid: "Paradox-PXWiFiV1-A1B2",
                 apIpAddress: "192.168.4.1",
                 apPassword: "",
-                apEnabled: true
+                apEnabled: false
             };
         }
 
@@ -997,7 +997,7 @@
                 const payload = {
                     wifiSsid: el("wifiSsid").value,
                     wifiPassword: el("wifiPassword").value,
-                    apEnabled: el("apEnabled") ? el("apEnabled").checked : true
+                    apEnabled: el("apEnabled") ? el("apEnabled").checked : false
                 };
                 if (statusEl) {
                     statusEl.textContent = `Connecting to ${payload.wifiSsid || "selected network"}...`;
@@ -1024,7 +1024,7 @@
                     networkName: el("networkName").value,
                     uiPassword: el("uiPassword") ? el("uiPassword").value : "",
                     apPassword: el("apPassword") ? el("apPassword").value : "",
-                    apEnabled: el("apEnabled") ? el("apEnabled").checked : true
+                    apEnabled: el("apEnabled") ? el("apEnabled").checked : false
                 };
                 const result = await api("/api/connection", {
                     method: "POST",

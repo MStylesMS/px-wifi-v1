@@ -7,10 +7,13 @@ embeds into the firmware build (`esp_app_desc_t.version`).
 
 ## [Unreleased]
 
-### Fixed
+## [0.41] - 2026-09-07
 
-- Native `<select>` dropdowns: light fill and dark type (`#07101f` on `#e8f0ff`)
-  so Windows option lists are readable on Signal Glass pages.
+### Changed
+
+- SoftAP policy matches other `px-*-v1` props: default **`apEnabled=false`**.
+  SoftAP still starts for recovery; it **shuts down ~3 s after STA gets an IP**,
+  and comes back if STA drops. Connect UI can keep the AP up while on Wi‑Fi.
 
 ## [0.40] - 2026-09-02
 
